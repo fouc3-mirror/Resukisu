@@ -56,6 +56,11 @@ on:
         required: false
         type: string
         default: ""
+      build_time:
+        description: "内核构建时间 (留空=当前 UTC，即 uname -v 显示真实时间)"
+        required: false
+        type: string
+        default: ""
       use_zram:
         description: "启用 ZRAM 增强算法 (LZ4KD)"
         required: false
@@ -103,6 +108,8 @@ jobs:
       sub_level: ${{ inputs.sub_level }}
       os_patch_level: ${{ inputs.os_patch_level }}
       revision: ${{ inputs.revision }}
+      # 留空 => build.yml 使用当前 UTC 时间，uname -v 显示真实构建时间
+      build_time: ${{ inputs.build_time }}
       use_zram: ${{ inputs.use_zram }}
       use_bbg: ${{ inputs.use_bbg }}
       supp_op: ${{ inputs.supp_op }}
