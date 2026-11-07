@@ -485,6 +485,23 @@ jobs:
 
           # 应用版本特定 SUSFS 修复
           if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+            # 上游兼容补丁可能随 WildKernels 仓库结构调整而移动；缺失时跳过而不是让构建失败
+            apply_opt_patch() {
+              local src="$1"
+              local name
+              if [ ! -f "$src" ]; then
+                echo "::warning::兼容补丁不存在，跳过: $src"
+                return 0
+              fi
+              name="$(basename "$src")"
+              cp "$src" ./
+              if patch -p1 --forward < "./$name"; then
+                echo "已应用兼容补丁: $name"
+              else
+                echo "::warning::兼容补丁未完全应用: $name"
+              fi
+            }
+
             CURRENT_SUB="${{ inputs.sub_level }}"
             if [[ ! "$CURRENT_SUB" =~ ^[0-9]+$ ]]; then
               CURRENT_SUB=99999
@@ -496,12 +513,10 @@ jobs:
                 sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
               fi
               if [[ "$CURRENT_SUB" -le 117 ]]; then
-                cp $KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a12-5.10/fdinfo.c.patch ./
-                patch -p1 < fdinfo.c.patch || true
+                apply_opt_patch "$KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a12-5.10/fdinfo.c.patch"
               fi
               if [[ "$CURRENT_SUB" -le 43 ]]; then
-                cp $KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a12-5.10/base.c.patch ./
-                patch -p1 < base.c.patch || true
+                apply_opt_patch "$KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a12-5.10/base.c.patch"
                 # TODO: 等待 WildKernels 更新补丁后移除注释
                 # # 修复 WildKernels 补丁中的旧符号 BIT_SUS_MAPS (SUSFS 仓库已重命名为 AS_FLAGS_SUS_MAP + test_bit)
                 # if grep -q 'BIT_SUS_MAPS' ./fs/proc/base.c; then
@@ -521,12 +536,9 @@ jobs:
             # Android 13 - 5.15 修复
             if [[ "${{ inputs.android_version }}" == "android13" && "${{ inputs.kernel_version }}" == "5.15" ]]; then
               if [[ "$CURRENT_SUB" -le 41 ]]; then
-                cp $KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a13-5.15/namespace.c.patch ./
-                patch -p1 < namespace.c.patch || true
-                cp $KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a13-5.15/fdinfo.c.patch ./
-                patch -p1 < fdinfo.c.patch || true
-                cp $KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a13-5.15/open.c.patch ./
-                patch -p1 < open.c.patch || true
+                apply_opt_patch "$KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a13-5.15/namespace.c.patch"
+                apply_opt_patch "$KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a13-5.15/fdinfo.c.patch"
+                apply_opt_patch "$KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a13-5.15/open.c.patch"
                 # TODO: 等待 WildKernels 更新补丁后移除注释
                 # # 修复 i_user_ns: 5.15.41 没有此函数, SUSFS 仓库重建后新增了 &fi->inode 变体
                 # sed -i 's|is_i_uid_not_allowed(i_uid_into_mnt(i_user_ns(&fi->inode), &fi->inode).val)))|is_i_uid_not_allowed(fi->inode.i_uid.val)))|g' fs/susfs.c
@@ -541,8 +553,7 @@ jobs:
             # Android 14 - 6.1 修复
             if [[ "${{ inputs.android_version }}" == "android14" && "${{ inputs.kernel_version }}" == "6.1" ]]; then
               if [[ "$CURRENT_SUB" -le 138 || "$CURRENT_SUB" -ge 145 ]]; then
-                cp $KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a14-6.1/base.c.patch ./
-                patch -p1 < base.c.patch || true
+                apply_opt_patch "$KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a14-6.1/base.c.patch"
               fi
               if ! grep -qF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
                 sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' ./fs/proc/base.c
@@ -558,8 +569,7 @@ jobs:
             # Android 15 - 6.6 修复
             if [[ "${{ inputs.android_version }}" == "android15" && "${{ inputs.kernel_version }}" == "6.6" ]]; then
               if [[ "$CURRENT_SUB" -ge 98 ]]; then
-                cp $KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a15-6.6/base.c.patch ./
-                patch -p1 < base.c.patch || true
+                apply_opt_patch "$KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a15-6.6/base.c.patch"
               fi
               # 修复 6.6.50~6.6.97: SUSFS 补丁引用了 AS_FLAGS_SUS_MAP / susfs_is_current_proc_umounted_app
               # 但缺少 #include <linux/susfs_def.h>，导致编译报 undeclared identifier
@@ -572,8 +582,7 @@ jobs:
                 sed -i '/#include <linux\/dma-buf.h>/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP' ./fs/proc/base.c
               fi
               if [[ "$CURRENT_SUB" -le 58 ]]; then
-                cp $KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a15-6.6/task_mmu.c.patch ./
-                patch -p1 < task_mmu.c.patch || true
+                apply_opt_patch "$KERNEL_PATCHES/wild/susfs_fix_patches/v${SUSFS_VERSION}/a15-6.6/task_mmu.c.patch"
               fi
             fi
           fi
