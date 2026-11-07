@@ -58,7 +58,23 @@ vc-teahouse     ×1
 - `vermagic` 与上面一致，原厂 vendor 模块仍可加载
 - `CONFIG_CC_VERSION_TEXT` 与原厂逐字相同（同一套 clang 18.0.0 / LLD 18.0.0）
 
-## 4. 仍存在的风险（改不掉或代价太大）
+## 4. 验证结果（隐身版 vs 上一版）
+
+对 `build-ak3-stealth.yml` 产出的 `boot.img` 直接做字节级比对：
+
+| 特征 | 上一版 | 隐身版 | 说明 |
+|---|---|---|---|
+| `IKCFG_ST` / `IKCFG_ED` | 1 / 1 | **0 / 0** | `/proc/config.gz` 完全没有，`.config` 不再进镜像 |
+| `baseband_guard` | 9 | **0** | LSM 列表与原厂一致 |
+| `vc-teahouse` | 1 | **0** | BBG 代码未再进入镜像 |
+| `susfs:[` （日志格式串） | 有 | **0** | `CONFIG_KSU_SUSFS_ENABLE_LOG=n` 生效 |
+| `KernelSU` 字符串 | 329 | 仍有 | 必然存在，属 rodata |
+| `CONFIG_KSU` | 10 | 9 | 只剩 9 条 `CONFIG_KSU_SUSFS_*` 特性名，来自 `susfs_get_enabled_features()`，只有 root 通过 ioctl 才读得到 |
+| `uname -r` | 正确 | 正确 | `6.6.118-android15-8-g0908354dac1b-ab16143355-4k` |
+| `uname -v` | 正确 | 正确 | `#1 SMP PREEMPT Thu Aug 20 09:40:32 UTC 2026` |
+| `Image` 大小 | 38,046,208 | 37,001,728 | 原厂 36,801,024，`LTO=none` 后更接近 |
+
+## 5. 仍存在的风险（改不掉或代价太大）
 
 1. `/sys/kernel/btf/vmlinux`（`CONFIG_DEBUG_INFO_BTF=y`，原厂也有）
    是 BTF 类型表，里面能看到内核符号名。关掉会让 vendor 的 BPF/CO-RE 程序失效，

@@ -158,10 +158,17 @@ jobs:
               echo "OK: 未发现 $1"
             fi
           }
-          check_absent 'IKCFG_ST'
-          check_absent 'CONFIG_KSU'
-          check_absent 'baseband_guard'
-          check_absent 'vc-teahouse'
+          # 这三类是用户态真的能读到的，必须为 0
+          check_absent 'IKCFG_ST'        # /proc/config.gz 里的内嵌 .config
+          check_absent 'baseband_guard'  # /sys/kernel/security/lsm 里的 LSM 名
+          check_absent 'vc-teahouse'     # BBG 的上游地址
+
+          # 下面这些只存在于镜像 .rodata，普通 App 读不到（要 root + kallsyms/BTF），
+          # 而 "KernelSU" 字符串本身就无法抹除，所以只统计不拦截。
+          for s in CONFIG_KSU KernelSU susfs; do
+            n=$(grep -ao "$s" "$BOOT" | wc -l)
+            echo "INFO: '$s' 在镜像中出现 $n 次（仅 rodata，非运行时暴露）"
+          done
 
           echo "---- 内核版本串 ----"
           grep -ao 'Linux version 6\.[0-9.]*-android1[0-9]-[0-9]*-[^ )]*' "$BOOT" | head -n1 || true
