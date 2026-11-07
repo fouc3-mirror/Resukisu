@@ -84,5 +84,88 @@ vc-teahouse     ×1
    和伪造的 `uname -v` 对不上。只有 root 通过 `/proc/keys` 或直接读镜像才看得到，
    普通 App 没有这个入口。
 3. `/proc/kallsyms`：需要 root 才能读，SUSFS 已做符号隐藏。
-4. `boot.img` 未做 AVB 签名。刷入后 Verified Boot 状态必然从 green 变 orange，
+4. `boot.img` 的 AVB 用的是 CI 现生成的测试密钥（`testkey_rsa2048.pem`），
+   签名本身有效但不被 bootloader 信任。刷入后 Verified Boot 状态必然从 green 变 orange，
    这类“系统完整性”检测和内核本身无关，属于解锁 bootloader 的固有代价。
+
+## 6. `Tampered Attestation Key(26)`：boot 分区的 KeyMint 版本绑定属性
+
+### 6.1 现象
+
+春秋检测器（Chunqiu Detector）的 `Tampered Attestation Key(26)` 命中，
+按该项目的说明，26 号标签的含义是
+“**证书 patch 标签与系统属性不一致**”
+（[检测项说明](https://github.com/mingzun09/Chunqiu-Detector-Problem-solution/blob/main/language/answer_zh.md)，
+官方给的解法是写 `/data/adb/tricky_store/security_patch.txt`）。
+
+### 6.2 根因：重建 boot.img 时把原厂的 AVB 属性丢了
+
+原厂 `boot.img`（同 ROM 的 `images/boot.img`）尾部 vbmeta 的 hash descriptor 里带着
+三条 property descriptor：
+
+```
+com.android.build.boot.os_version     = 15
+com.android.build.boot.fingerprint    = Redmi/warsaw/warsaw:15/AQ3A.250226.002/OS4.0.5.1.XHPCN:user/release-keys
+com.android.build.boot.security_patch = 2026-09-01
+```
+
+我们自己用 `avbtool add_hash_footer` 重建的 `boot.img` 里，这三条**一条都没有**
+（只剩 `sha256` 和 `boot` 两个哈希描述符，`strings` 里也搜不到）。
+
+这层属性的用途写在 AOSP
+[Version information in AVB properties](https://source.android.com/devices/bootloader/version-info-avb)：
+为了支持 **KeyMint 版本绑定**，bootloader 需要用 `avb_property_lookup()` 从 vbmeta 里
+取出每个分区的 OS 版本和补丁级别，再交给 TEE 里的 KeyMint；
+KeyMint 把 boot 分区的补丁级别写进密钥证明证书的 `bootPatchLevel` 标签。
+
+所以：属性缺失 → bootloader 没有 boot 分区的 SPL 可交 → 证书里的 boot 补丁标签
+为空/0 → 与 `ro.build.version.security_patch`（本机 `2026-10-01`）对不上 → 命中 26。
+这也解释了为什么“换回上游产物就正常”：上游产物同样是 `add_hash_footer`，
+但它那台设备/那套模块读的是别的来源，而这里 boot 侧完全没数据可读。
+
+顺带说明：原厂 boot 的 `2026-09-01` 与系统侧 `2026-10-01` 本身就差一个月，
+所以 Redmi/小米 机型即使不 root 也常报 26（项目文档里也写了“无视即可”）。
+我们的做法是**把 boot 侧同步成系统侧的值**，让两边一致。
+
+### 6.3 修复
+
+`build.yml` 的 `构建 Boot 镜像 (Android 13+)` 里给 `mkbootimg` 和 `avbtool` 补上：
+
+```bash
+$MKBOOTIMG --header_version 4 --kernel Image --output boot.img \
+  --os_version "$BOOT_OS_VERSION_STR" --os_patch_level "$BOOT_PATCH_MONTH"
+
+$AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) \
+  --image boot.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH \
+  --prop com.android.build.boot.os_version:15 \
+  --prop com.android.build.boot.security_patch:2026-10-01
+```
+
+新增输入 `boot_os_version`（留空按 `android_version` 推导）与
+`boot_security_patch`（留空按 `<os_patch_level>-01` 推导），
+并在构建后加了一步校验：属性缺失直接 fail，不再产出“看起来正常”的包。
+
+本地对已知能开机的镜像做过等长验证：只改 header 的 `os_version`
+（0 → `15.0.0` / `2026-10`）并追加两条 prop，`Image` 逐字节不变：
+
+```
+header os_version 0x1e0001aa -> 15.0.0 2026-10
+props: com.android.build.boot.os_version=15
+       com.android.build.boot.security_patch=2026-10-01
+kernel identical: True
+```
+
+### 6.4 用户态还有一层（用了 TrickyStore/TEESimulator 才需要）
+
+如果设备上装了证书合成类模块（TrickyStore / TEESimulator / OhMyKeymint 等），
+证书链是模块自己生成的，patch 标签取自 `/data/adb/tricky_store/security_patch.txt`，
+和内核无关。该文件不存在或过期时同样命中 26，需要写成：
+
+```
+system=202610
+boot=2026-10-01
+vendor=2026-10-01
+```
+
+（也可直接删掉该文件让模块回落到系统属性；改完必须重启再测。）
+
