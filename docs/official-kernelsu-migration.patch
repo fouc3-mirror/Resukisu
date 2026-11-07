@@ -1,0 +1,2337 @@
+--- a/.github/workflows/Auto_Trigger.yml
++++ b/.github/workflows/Auto_Trigger.yml
+@@ -1,8 +1,9 @@
+-name: Auto Trigger on SukiSU Update
++name: Auto Trigger on KernelSU Update
+ 
+-于:
++# 跟踪官方 KernelSU (tiann/KernelSU) main 分支更新，并可按需触发内核构建
++on:
+   schedule:
+-    - cron: '0 0 */3 * *'  # 每两天执行一次
++    - cron: '0 0 */3 * *'  # 每三天执行一次
+   workflow_dispatch:     # 允许手动触发
+ 
+ jobs:
+@@ -16,14 +17,18 @@
+         with:
+           token: ${{ secrets.GITHUB_TOKEN }}
+           fetch-depth: 0
+-          
+-      - name: Get latest commit SHA from SukiSU-Ultra
++
++      - name: Get latest commit SHA from tiann/KernelSU
+         id: get_sha
+         run: |
+-          LATEST_SHA=$(curl -s https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/commits/main | jq -r '.sha')
++          LATEST_SHA=$(curl -fsSL https://api.github.com/repos/tiann/KernelSU/commits/main | jq -r '.sha')
++          if [ -z "$LATEST_SHA" ] || [ "$LATEST_SHA" = "null" ]; then
++            echo "::error::无法获取官方 KernelSU main 最新提交"
++            exit 1
++          fi
+           echo "sha=$LATEST_SHA" >> $GITHUB_OUTPUT
+           echo "Latest SHA: $LATEST_SHA"
+-          
++
+       - name: Get previous SHA from sha branch
+         id: get_prev_sha
+         run: |
+@@ -46,16 +51,16 @@
+           fi
+ 
+           git checkout ${{ github.ref_name }}
+-          
++
+       - name: Compare with previous SHA
+         id: compare
+         run: |
+           CURR_SHA="${{ steps.get_sha.outputs.sha }}"
+           PREV_SHA="${{ steps.get_prev_sha.outputs.prev_sha }}"
+-          
++
+           echo "Current SHA: $CURR_SHA"
+           echo "Previous SHA: $PREV_SHA"
+-          
++
+           if [ "$CURR_SHA" != "$PREV_SHA" ]; then
+             echo "new_commit=true" >> $GITHUB_OUTPUT
+             echo "New commit detected!"
+@@ -63,44 +68,41 @@
+             echo "new_commit=false" >> $GITHUB_OUTPUT
+             echo "No new commits"
+           fi
+-          
++
+       - name: Update SHA file in sha branch
+         if: steps.compare.outputs.new_commit == 'true'
+         run: |
+ 
+           git checkout sha 2>/dev/null || git checkout --orphan sha
+-          
++
+ 
+           if [ ! -f "latest_sha.txt" ]; then
+             git rm -rf . 2>/dev/null || true
+           fi
+ 
+           echo "${{ steps.get_sha.outputs.sha }}" > latest_sha.txt
+-          
++
+           git config --local user.email "action@github.com"
+           git config --local user.name "GitHub Action"
+           git add latest_sha.txt
+-          git commit -m "Update SukiSU latest SHA to ${{ steps.get_sha.outputs.sha }}" || exit 0
++          git commit -m "Update KernelSU latest SHA to ${{ steps.get_sha.outputs.sha }}" || exit 0
+           git push origin sha
+-          
+-      # - name: Trigger test_release.yml workflow
+-      #   if: steps.compare.outputs.new_commit == 'true'
+-      #   run: |
+-      #      curl -X POST \
+-      #       -H "Accept: application/vnd.github+json" \
+-      #       -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+-      #       -H "X-GitHub-Api-Version: 2022-11-28" \
+-      #       https://api.github.com/repos/${{ github.repository }}/actions/workflows/test_release.yml/dispatches \
+-      #       -d '{
+-      #         "ref": "dev",
+-      #         "inputs": {
+-      #           "make_release": "true",
+-      #           "kernelsu_variant": "SukiSU",
+-      #           "kernelsu_branch": "Stable(标准)",
+-      #           "version": "",
+-      #           "use_zram": "false",
+-      #           "use_bbg": "true",
+-      #           "use_kpm": "true",
+-      #           "get_manager": "true"
+-      #         }
+-      #       }'
++
++      - name: Trigger 构建内核 workflow
++        if: steps.compare.outputs.new_commit == 'true'
++        continue-on-error: true
++        run: |
++          curl -fsSL -X POST \
++            -H "Accept: application/vnd.github+json" \
++            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
++            -H "X-GitHub-Api-Version: 2022-11-28" \
++            https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches \
++            -d '{
++              "ref": "dev",
++              "inputs": {
++                "release_type": "Actions",
++                "use_zram": "false",
++                "use_bbg": "true",
++                "build_all": "true"
++              }
++            }'
+--- /dev/null
++++ b/.github/workflows/build-ak3.yml
+@@ -0,0 +1,156 @@
++# ========================================
++# 单版本 AK3 打包入口
++# ========================================
++# 只编译一个 Android/内核版本组合，最终只上传 AnyKernel3 压缩包，
++# 适合按机型参数（设置 → 关于手机 → 内核版本）快速出包。
++#
++# 示例：内核显示 6.6.118-android15-8-g0908354dac1b
++#   → android_version = android15
++#   → kernel_version  = 6.6
++#   → sub_level       = 118
++# ========================================
++
++name: 单版本 AK3 打包
++
++permissions:
++  contents: write
++  actions: write
++
++on:
++  workflow_dispatch:
++    inputs:
++      android_version:
++        description: "Android 版本"
++        required: true
++        type: choice
++        options:
++          - android12
++          - android13
++          - android14
++          - android15
++          - android16
++        default: android15
++      kernel_version:
++        description: "内核版本"
++        required: true
++        type: choice
++        options:
++          - "5.10"
++          - "5.15"
++          - "6.1"
++          - "6.6"
++          - "6.12"
++        default: "6.6"
++      sub_level:
++        description: "子版本号 (内核版本里的第三段，如 6.6.118 → 118)"
++        required: true
++        type: string
++        default: "118"
++      os_patch_level:
++        description: "安全补丁级别 (如 2026-01, lts)"
++        required: true
++        type: string
++        default: "2026-01"
++      revision:
++        description: "修订版本 (如 r11, 仅 Android 12 - 5.10 需要)"
++        required: false
++        type: string
++        default: ""
++      use_zram:
++        description: "启用 ZRAM 增强算法 (LZ4KD)"
++        required: false
++        type: boolean
++        default: false
++      use_bbg:
++        description: "启用 BBG 防格机"
++        required: false
++        type: boolean
++        default: true
++      supp_op:
++        description: "添加一加 8E 处理器支持"
++        required: false
++        type: boolean
++        default: false
++
++jobs:
++  # ==================== 预检 ====================
++  # 先确认 ACK 分支存在，避免白跑一次 30 分钟的编译
++  preflight:
++    name: "预检 ${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
++    runs-on: ubuntu-latest
++    steps:
++      - name: 校验 ACK 分支
++        run: |
++          BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
++          echo "检查 android.googlesource.com/kernel/common 分支: $BRANCH"
++          if git ls-remote --exit-code --heads \
++              https://android.googlesource.com/kernel/common "$BRANCH" >/dev/null 2>&1; then
++            echo "分支存在: $BRANCH"
++          else
++            echo "::error::ACK 分支不存在: $BRANCH ，请检查 android_version / kernel_version / os_patch_level"
++            exit 1
++          fi
++
++  # ==================== 编译内核 ====================
++  build:
++    name: "${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}"
++    needs: preflight
++    uses: ./.github/workflows/build.yml
++    secrets: inherit
++    with:
++      android_version: ${{ inputs.android_version }}
++      kernel_version: ${{ inputs.kernel_version }}
++      sub_level: ${{ inputs.sub_level }}
++      os_patch_level: ${{ inputs.os_patch_level }}
++      revision: ${{ inputs.revision }}
++      use_zram: ${{ inputs.use_zram }}
++      use_bbg: ${{ inputs.use_bbg }}
++      supp_op: ${{ inputs.supp_op }}
++      enable_susfs: true
++
++  # ==================== 只保留 AK3 包 ====================
++  package-ak3:
++    name: "打包 AK3"
++    needs: build
++    runs-on: ubuntu-latest
++    steps:
++      - name: 下载构建产物
++        uses: actions/download-artifact@v4
++        with:
++          pattern: 'KernelSU_kernel-*'
++          path: ./artifacts
++          merge-multiple: true
++
++      - name: 筛选 AnyKernel3 压缩包
++        run: |
++          mkdir -p ak3
++          find ./artifacts -type f -name '*AnyKernel3.zip' -exec cp -v {} ./ak3/ \;
++          COUNT=$(find ./ak3 -type f -name '*.zip' | wc -l)
++          if [ "$COUNT" -eq 0 ]; then
++            echo "::error::没有找到 AnyKernel3 压缩包，构建可能未生成 Image"
++            exit 1
++          fi
++          echo "找到 $COUNT 个 AK3 包"
++          ls -l ./ak3
++
++      - name: 上传 AK3 包
++        uses: actions/upload-artifact@v4
++        with:
++          name: AK3-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}
++          path: ./ak3/*.zip
++          if-no-files-found: error
++          compression-level: 0
++
++      - name: 摘要
++        run: |
++          {
++            echo "## AK3 打包完成"
++            echo ""
++            echo "- Android: ${{ inputs.android_version }}"
++            echo "- 内核: ${{ inputs.kernel_version }}.${{ inputs.sub_level }}"
++            echo "- 补丁级别: ${{ inputs.os_patch_level }}"
++            echo "- SUSFS: 已启用"
++            echo "- KPM: 未集成"
++            echo ""
++            echo "下载 artifact: \`AK3-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}\`"
++          } >> $GITHUB_STEP_SUMMARY
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -1,7 +1,7 @@
+ # ========================================
+ # GKI 内核构建工作流
+ # ========================================
+-# 此工作流负责编译 Android GKI 内核，支持多种 KernelSU 变体和 SUSFS
++# 此工作流负责编译 Android GKI 内核，集成官方 KernelSU (tiann/KernelSU) 与 SUSFS
+ # 通过 workflow_call 被其他工作流调用，不直接手动触发
+ # ========================================
+ 
+@@ -29,17 +29,17 @@
+         type: string
+ 
+       # ==================== KernelSU 配置 ====================
++      # 固定使用官方 tiann/KernelSU main 分支；此处仅用于校验调用方未传入其它变体
+       ksu_variant:
+-        required: true
++        required: false
+         type: string
+-      ksu_branch:
+-        required: true
+-        type: string
++        default: Official
+ 
+       # ==================== 可选配置 ====================
+       version:
+         required: false
+         type: string
++        # 兼容保留字段：内核名称使用上游官方名称，不再注入自定义后缀
+       revision:
+         required: false
+         type: string
+@@ -50,19 +50,16 @@
+ 
+       # ==================== 功能开关 ====================
+       use_zram:
+-        required: true
++        required: false
+         type: boolean
+         default: true
+       use_bbg:
+-        required: true
++        required: false
+         type: boolean
+         default: true
+-      use_kpm:
+-        required: true
+-        type: boolean
+-        default: true
++      # KPM is not integrated: see the defconfig step that forces CONFIG_KPM off.
+       enable_susfs:
+-        required: true
++        required: false
+         type: boolean
+         default: true
+       supp_op:
+@@ -72,7 +69,7 @@
+ 
+ jobs:
+   build-kernel:
+-    name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-${{ inputs.ksu_variant }}"
++    name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-KernelSU"
+     runs-on: ubuntu-latest
+     timeout-minutes: 60
+ 
+@@ -95,13 +92,13 @@
+           echo "内核版本      : ${{ inputs.kernel_version }}"
+           echo "子版本号      : ${{ inputs.sub_level }}"
+           echo "补丁级别      : ${{ inputs.os_patch_level }}"
+-          echo "KSU 变体      : ${{ inputs.ksu_variant }}"
+-          echo "KSU 分支      : ${{ inputs.ksu_branch }}"
++          echo "KSU 名称      : KernelSU (官方)"
++          echo "KSU 源码      : tiann/KernelSU main"
+           echo "构建时间      : ${{ inputs.build_time }}"
+           echo "SUSFS 状态    : ${{ inputs.enable_susfs }}"
+           echo "ZRAM 增强     : ${{ inputs.use_zram }}"
+           echo "BBG 补丁      : ${{ inputs.use_bbg }}"
+-          echo "KPM 功能      : ${{ inputs.use_kpm }}"
++          echo "KPM 功能      : 已禁用"
+           echo "Stock Config  : 自动检测 config/stock_defconfig"
+           echo "========================================"
+ 
+@@ -135,6 +132,11 @@
+           KERNEL_ROOT="$GITHUB_WORKSPACE/$CONFIG"
+           mkdir -p "$KERNEL_ROOT"
+ 
++          if [ "${{ inputs.ksu_variant }}" != "Official" ]; then
++            echo "::error::此构建仅支持官方 KernelSU，收到: ${{ inputs.ksu_variant }}"
++            exit 1
++          fi
++
+           # 导出环境变量到后续步骤
+           cat >> $GITHUB_ENV << EOF
+           CONFIG=$CONFIG
+@@ -142,7 +144,7 @@
+           DEFCONFIG=$KERNEL_ROOT/common/arch/arm64/configs/gki_defconfig
+           SUSFS4KSU=$GITHUB_WORKSPACE/susfs4ksu
+           KERNEL_PATCHES=$GITHUB_WORKSPACE/kernel_patches
+-          SUKISU_PATCHES=$GITHUB_WORKSPACE/SukiSU_patch
++          ZRAM_PATCHES=$GITHUB_WORKSPACE/zram_patches
+           ZZH_PATCHES=$GITHUB_WORKSPACE
+           ANYKERNEL3=$GITHUB_WORKSPACE/AnyKernel3
+           ACTION_BUILD=$GITHUB_WORKSPACE/Action-Build
+@@ -232,27 +234,39 @@
+       # 克隆 AnyKernel3、SUSFS、各种补丁仓库
+       - name: 克隆依赖仓库
+         run: |
+-          ANYKERNEL_BRANCH="gki-2.0"
++          ANYKERNEL_BRANCH="master"
++          SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
+           SUSFS_BRANCH="gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}"
+ 
+-          echo "克隆 AnyKernel3..."
+-          git clone https://github.com/WildKernels/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
++          echo "克隆 AnyKernel3 (官方 osm0sis, 分支: $ANYKERNEL_BRANCH)..."
++          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
+           rm -rf AnyKernel3/.git
+ 
++          # 克隆 SUSFS，并按其分支确定内核补丁文件名
++          clone_susfs() {
++            rm -rf susfs4ksu
++            git clone --depth=1 "$SUSFS_REPO" -b "$SUSFS_BRANCH" susfs4ksu || return 1
++            SUSFS_KERNEL_PATCH="50_add_susfs_in_${SUSFS_BRANCH}.patch"
++            [ -f "susfs4ksu/kernel_patches/$SUSFS_KERNEL_PATCH" ]
++          }
++
+           echo "克隆 SUSFS (分支: $SUSFS_BRANCH)..."
+-          if [ "${{ inputs.ksu_variant }}" == "SukiSU" ]; then
+-            # SukiSU 优先使用 ShirkNeko 的 SUSFS 分支，若不存在则回退到 simonpunk 原版
+-            if ! git clone https://github.com/ShirkNeko/susfs4ksu.git -b "$SUSFS_BRANCH" 2>/dev/null; then
+-              echo "ShirkNeko 仓库未找到分支 $SUSFS_BRANCH，回退到 simonpunk 原版..."
+-              git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
+-            fi
+-          elif [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ]; then
+-            # ReSukiSU 使用 simonpunk 的原版 SUSFS
+-            git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
+-          else
+-            # 其他变体使用 simonpunk 的原版 SUSFS
+-            git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
+-          fi
++          if ! clone_susfs; then
++            if [ "${{ inputs.kernel_version }}" = "5.10" ]; then
++              echo "::warning::SUSFS 分支 $SUSFS_BRANCH 不可用，回退到 gki-android12-5.10"
++              SUSFS_BRANCH="gki-android12-5.10"
++              if ! clone_susfs; then
++                echo "::error::SUSFS 仓库克隆失败: $SUSFS_REPO"
++                exit 1
++              fi
++            else
++              echo "::error::SUSFS 分支不可用: $SUSFS_BRANCH"
++              exit 1
++            fi
++          fi
++          echo "SUSFS_BRANCH=$SUSFS_BRANCH" >> "$GITHUB_ENV"
++          echo "SUSFS_KERNEL_PATCH=$SUSFS_KERNEL_PATCH" >> "$GITHUB_ENV"
++          echo "SUSFS 内核补丁: $SUSFS_KERNEL_PATCH"
+ 
+           # 检查是否启用自定义提交
+           CONFIG_FILE="config/config"
+@@ -275,7 +289,8 @@
+ 
+           echo "准备补丁资源..."
+           git clone https://github.com/WildKernels/kernel_patches.git
+-          git clone https://github.com/ShirkNeko/SukiSU_patch.git
++          # 第三方 ZRAM/LZ4KD 补丁集合（仅用于压缩算法增强，与 KernelSU 集成无关）
++          git clone --depth=1 https://github.com/ShirkNeko/SukiSU_patch.git "$ZRAM_PATCHES"
+           echo "使用当前仓库补丁目录: $ZZH_PATCHES"
+           git clone https://github.com/Numbersf/Action-Build.git --depth=1
+ 
+@@ -400,179 +415,27 @@
+           curl -LSs "https://github.com/zzh20188/GKI_KernelSU_SUSFS/raw/refs/heads/dev/hmbird_patch.c" -o hmbird_patch.c
+           echo "obj-y += hmbird_patch.o" >> Makefile
+ 
+-      # ==================== 确定 KernelSU 分支 ====================
+-      # 根据用户选择的变体和分支，确定实际使用的 Git 分支
+-      - name: 确定 KernelSU 分支
++      # ==================== 确定 KernelSU 源码 ====================
++      - name: 确定官方 KernelSU 源码
+         id: ksu-branch
+         run: |
+-          branch_input="${{ inputs.ksu_branch }}"
+-          variant_input="${{ inputs.ksu_variant }}"
+-
+-          if [ "$variant_input" = "ReSukiSU" ]; then
+-            BRANCH="-s main"
+-          else
+-            case "$branch_input" in
+-              "Stable(标准)")
+-                case "$variant_input" in
+-                  "Next") ;; # Next 使用硬编码分支，不需要 BRANCH
+-                  "SukiSU") BRANCH="-s builtin" ;;
+-                  "Official"|"MKSU") BRANCH="-s main" ;;
+-                  *) BRANCH="-" ;;
+-                esac
+-                ;;
+-              "Dev(开发)")
+-                case "$variant_input" in
+-                  "Official"|"MKSU") BRANCH="-s main" ;;
+-                  "Next") ;; # Next 使用硬编码分支，不需要 BRANCH
+-                  "SukiSU") BRANCH="-s builtin" ;;
+-                  *) echo "未知变体: $variant_input" >&2; exit 1 ;;
+-                esac
+-                ;;
+-              *)
+-                echo "未知分支: $branch_input" >&2
+-                exit 1
+-                ;;
+-            esac
+-
+-            # SukiSU 不启用 SUSFS 时强制使用 main 分支
+-            if [ "$variant_input" = "SukiSU" ] && [ "${{ inputs.enable_susfs }}" = "false" ]; then
+-              BRANCH="-s main"
+-            fi
+-          fi
+-
+-          # 检查是否启用自定义提交 (仅对 SukiSU 生效)
+-          CONFIG_FILE="config/config"
+-          if [ -f "$CONFIG_FILE" ]; then
+-            CUSTOM_ENABLED=$(grep "^custom=" "$CONFIG_FILE" | cut -d'=' -f2)
+-            if [ "$CUSTOM_ENABLED" == "true" ] && [ "$variant_input" == "SukiSU" ]; then
+-              SUKISU_COMMIT=$(grep "^sukisu=" "$CONFIG_FILE" | cut -d'=' -f2)
+-              if [ -n "$SUKISU_COMMIT" ]; then
+-                BRANCH="-s $SUKISU_COMMIT"
+-                echo "SukiSU 使用自定义提交: $SUKISU_COMMIT"
+-              fi
+-            fi
+-          fi
+-
+-          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+-          echo "KSU 分支: $BRANCH"
+-
+-      # ==================== 添加 KernelSU ====================
+-      # 根据选择的变体添加对应的 KernelSU
+-      - name: 添加 KernelSU
++          # 始终跟随官方 tiann/KernelSU main 分支最新提交
++          KSU_REF="main"
++          echo "KSU_REF=$KSU_REF" >> "$GITHUB_ENV"
++          echo "KernelSU 源码引用: $KSU_REF"
++
++      # ==================== 添加官方 KernelSU ====================
++      - name: 添加官方 KernelSU
+         working-directory: ${{ env.KERNEL_ROOT }}
+         run: |
+-          case "${{ inputs.ksu_variant }}" in
+-            "Official")
+-              echo "添加 KernelSU 官方版..."
+-              curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash $BRANCH
+-
+-              # 计算并设置 KSU 版本号
+-              cd KernelSU
+-              KSU_GIT_VERSION=$(git rev-list --count HEAD)
+-              KSU_VERSION=$((20000 + KSU_GIT_VERSION))
+-              echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+-              echo "计算的 KSU 版本号: $KSU_VERSION"
+-
+-              # 更新 Kbuild 中的版本号
+-              if [ -f "kernel/Kbuild" ]; then
+-                sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+-                echo "已更新 kernel/Kbuild 中的版本号"
+-              fi
+-              cd ..
+-              ;;
+-            "Next")
+-              echo "添加 KernelSU-Next..."
+-              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/refs/heads/dev/kernel/setup.sh" | bash -s dev_susfs
+-              ;;
+-            "MKSU")
+-              echo "添加 MKSU..."
+-              curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/main/kernel/setup.sh" | bash $BRANCH
+-
+-              # 计算并设置 KSU 版本号
+-              cd KernelSU
+-              KSU_GIT_VERSION=$(git rev-list --count HEAD)
+-              KSU_VERSION=$((20000 + KSU_GIT_VERSION))
+-              echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+-              echo "计算的 KSU 版本号: $KSU_VERSION"
+-
+-              # 更新 Kbuild 中的版本号
+-              if [ -f "kernel/Kbuild" ]; then
+-                sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+-                echo "已更新 kernel/Kbuild 中的版本号"
+-              fi
+-              cd ..
+-              ;;
+-            "SukiSU")
+-              echo "添加 SukiSU..."
+-              curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash $BRANCH
+-              ;;
+-            "ReSukiSU")
+-              echo "添加 ReSukiSU..."
+-              curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash $BRANCH
+-              ;;
+-          esac
+-
+-          if [ -d "KernelSU/.git" ]; then
+-            KSU_LATEST_COMMIT_DATE=$(git -C KernelSU log -1 --date=format:'%Y-%m-%d %H:%M:%S %z' --format='%cd')
+-            echo "KSU_LATEST_COMMIT_DATE=$KSU_LATEST_COMMIT_DATE" >> $GITHUB_ENV
+-            echo "KSU 仓库最新提交日期: $KSU_LATEST_COMMIT_DATE"
+-          else
+-            echo "KSU_LATEST_COMMIT_DATE=未知" >> $GITHUB_ENV
+-          fi
+-
+-      # ==================== 定制 SukiSU 版本标识 ====================
+-      - name: 配置 SukiSU 管理器信息
+-        if: inputs.ksu_variant == 'SukiSU'
+-        working-directory: ${{ env.KERNEL_ROOT }}/KernelSU
+-        run: |
+-          KBUILD_FILE="./kernel/Kbuild"
+-          CUSTOM_TAG="${{ vars.MANAGER_STR }}"
+-
+-          if [ ! -f "$KBUILD_FILE" ]; then
+-            echo "未找到 $KBUILD_FILE，跳过 SukiSU 版本标识定制"
+-            exit 0
+-          fi
+-
+-          GIT_HASH=$(git rev-parse --short=8 HEAD)
+-          BRANCH_NAME="${BRANCH#-s }"
+-          if [ -z "$BRANCH_NAME" ] || [ "$BRANCH_NAME" = "$BRANCH" ]; then
+-            BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+-          fi
+-
+-          if [ -n "$CUSTOM_TAG" ]; then
+-            VERSION_TEMPLATE="v\$1-$CUSTOM_TAG@$BRANCH_NAME[$GIT_HASH]"
+-          else
+-            VERSION_TEMPLATE="v\$1-$GIT_HASH@$BRANCH_NAME"
+-          fi
+-
+-          awk -v body="$VERSION_TEMPLATE" '
+-            BEGIN {
+-              in_block = 0
+-              replaced = 0
+-            }
+-            /^[[:space:]]*define get_ksu_version_full$/ {
+-              print
+-              print body
+-              in_block = 1
+-              replaced = 1
+-              next
+-            }
+-            in_block && /^[[:space:]]*endef$/ {
+-              print
+-              in_block = 0
+-              next
+-            }
+-            !in_block {
+-              print
+-            }
+-            END {
+-              if (!replaced) {
+-                exit 1
+-              }
+-            }
+-          ' "$KBUILD_FILE" > "${KBUILD_FILE}.tmp" && mv "${KBUILD_FILE}.tmp" "$KBUILD_FILE"
+-
+-          echo "已更新 get_ksu_version_full 模板: $VERSION_TEMPLATE"
++          curl -fLSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s -- "$KSU_REF"
++          if [ ! -d "KernelSU/.git" ]; then
++            echo "::error::KernelSU source checkout missing"
++            exit 1
++          fi
++          KSU_LATEST_COMMIT_DATE=$(git -C KernelSU log -1 --date=format:'%Y-%m-%d %H:%M:%S %z' --format='%cd')
++          echo "KSU_LATEST_COMMIT_DATE=$KSU_LATEST_COMMIT_DATE" >> "$GITHUB_ENV"
++          echo "KernelSU main commit: $(git -C KernelSU rev-parse HEAD)"
+ 
+       # ==================== 应用 SUSFS 补丁 ====================
+       # SUSFS (Super User SUS FileSystem) 用于隐藏 root 痕迹
+@@ -583,41 +446,45 @@
+           echo "应用 SUSFS 补丁..."
+           SUSFS_VERSION="2.0.0"
+ 
++          # SUSFS 内核补丁文件名由 SUSFS 分支决定（例如 gki-android14-6.1）
++          SUSFS_PATCH_FILE="$SUSFS_KERNEL_PATCH"
++          if [ -z "$SUSFS_PATCH_FILE" ]; then
++            SUSFS_PATCH_FILE="50_add_susfs_in_${SUSFS_BRANCH}.patch"
++          fi
++          if [ ! -f "$SUSFS4KSU/kernel_patches/$SUSFS_PATCH_FILE" ]; then
++            echo "::error::未找到 SUSFS 内核补丁: $SUSFS4KSU/kernel_patches/$SUSFS_PATCH_FILE"
++            exit 1
++          fi
++          echo "使用 SUSFS 内核补丁: $SUSFS_PATCH_FILE"
++
+           # 复制 SUSFS 基础文件
+-          cp $SUSFS4KSU/kernel_patches/50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch ./common/
++          cp "$SUSFS4KSU/kernel_patches/$SUSFS_PATCH_FILE" ./common/
+           cp $SUSFS4KSU/kernel_patches/fs/* ./common/fs/
+           cp $SUSFS4KSU/kernel_patches/include/linux/* ./common/include/linux/
+ 
+-          case "${{ inputs.ksu_variant }}" in
+-            "Official"|"MKSU")
+-              cd ./KernelSU
+-              cp $SUSFS4KSU/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
+-
+-              # 修复补丁格式（Makefile → Kbuild）
+-              sed -i 's|kernel/Makefile|kernel/Kbuild|g' ./10_enable_susfs_for_ksu.patch
+-
+-              # 修复补丁上下文行数
+-              sed -i 's|^@@ .* format:.*|@@ -94,4 +94,13 @@|' ./10_enable_susfs_for_ksu.patch
+-
+-              # 修复编译警告配置
+-              sed -i 's|.*check-format:.*| ccflags-y += -Wno-strict-prototypes -Wno-int-conversion -Wno-gcc-compat -Wno-missing-prototypes|' ./10_enable_susfs_for_ksu.patch
+-              sed -i 's|.*clang-format --dry-run.*| ccflags-y += -Wno-declaration-after-statement -Wno-unused-function -Wno-unused-variable|' ./10_enable_susfs_for_ksu.patch
+-
+-              # 应用补丁
+-              patch -p1 < 10_enable_susfs_for_ksu.patch || true
+-              cd ..
+-              ;;
+-            "Next"|"SukiSU"|"ReSukiSU")
+-              echo "Next/SukiSU/ReSukiSU 使用内置 SUSFS 支持"
+-              ;;
+-          esac
++          # 官方 KernelSU：应用 SUSFS 提供的 KernelSU 侧补丁
++          KSU_SUSFS_PATCH="$SUSFS4KSU/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
++          if [ ! -f "$KSU_SUSFS_PATCH" ]; then
++            echo "::error::未找到 KernelSU 侧 SUSFS 补丁: $KSU_SUSFS_PATCH"
++            exit 1
++          fi
++
++          cd ./KernelSU
++          cp "$KSU_SUSFS_PATCH" ./10_enable_susfs_for_ksu.patch
++          if patch -p1 --dry-run --forward < 10_enable_susfs_for_ksu.patch >/dev/null 2>&1; then
++            patch -p1 --forward < 10_enable_susfs_for_ksu.patch
++          else
++            echo "::warning::10_enable_susfs_for_ksu.patch 与当前 KernelSU 上下文不完全匹配，尝试容错应用"
++            patch -p1 --forward -F 3 < 10_enable_susfs_for_ksu.patch || true
++          fi
++          cd ..
+ 
+           # 应用主 SUSFS 补丁到内核
+           cd $KERNEL_ROOT/common
+-          patch -p1 < 50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch || true
+-
+-          # 应用版本特定修复 (所有 KSU 变体)
+-          if [ "${{ inputs.ksu_variant }}" == "Official" ] || [ "${{ inputs.ksu_variant }}" == "MKSU" ] || [ "${{ inputs.ksu_variant }}" == "Next" ] || [ "${{ inputs.ksu_variant }}" == "SukiSU" ] || [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ]; then
++          patch -p1 < "$SUSFS_PATCH_FILE" || true
++
++          # 应用版本特定 SUSFS 修复
++          if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+             CURRENT_SUB="${{ inputs.sub_level }}"
+             if [[ ! "$CURRENT_SUB" =~ ^[0-9]+$ ]]; then
+               CURRENT_SUB=99999
+@@ -742,17 +609,17 @@
+           fi
+ 
+           # 第二阶段：应用 LZ4KD 和 LZ4K_OPLUS 补丁
+-          cp -r $SUKISU_PATCHES/other/zram/lz4k/include/linux/* ./include/linux/
+-          cp -r $SUKISU_PATCHES/other/zram/lz4k/lib/* ./lib/
+-          cp -r $SUKISU_PATCHES/other/zram/lz4k/crypto/* ./crypto/
+-          cp -r $SUKISU_PATCHES/other/zram/lz4k_oplus ./lib/
+-
+-          cp $SUKISU_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/lz4kd.patch ./
++          cp -r $ZRAM_PATCHES/other/zram/lz4k/include/linux/* ./include/linux/
++          cp -r $ZRAM_PATCHES/other/zram/lz4k/lib/* ./lib/
++          cp -r $ZRAM_PATCHES/other/zram/lz4k/crypto/* ./crypto/
++          cp -r $ZRAM_PATCHES/other/zram/lz4k_oplus ./lib/
++
++          cp $ZRAM_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/lz4kd.patch ./
+           if ! patch -p1 -F 3 < lz4kd.patch; then
+             echo "::warning::lz4kd.patch 应用失败，可能已应用或上下文不匹配"
+           fi
+ 
+-          cp $SUKISU_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/lz4k_oplus.patch ./
++          cp $ZRAM_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/lz4k_oplus.patch ./
+           if ! patch -p1 -F 3 < lz4k_oplus.patch; then
+             echo "::warning::lz4k_oplus.patch 应用失败，可能已应用或上下文不匹配"
+           fi
+@@ -880,9 +747,8 @@
+           CONFIG_TMPFS_POSIX_ACL=y
+           EOF
+ 
+-          if [ "${{ inputs.ksu_variant }}" == "SukiSU" ] || [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ] || [ "${{ inputs.ksu_variant }}" == "Next" ]; then
+-            echo "CONFIG_KPM=y" >> "$DEFCONFIG"
+-          fi
++          sed -i '/^CONFIG_KPM=/d; /^# CONFIG_KPM is not set$/d' "$DEFCONFIG"
++          echo '# CONFIG_KPM is not set' >> "$DEFCONFIG"
+ 
+           # 移除 defconfig 检查
+           sed -i 's/check_defconfig//' ./common/build.config.gki
+@@ -910,47 +776,16 @@
+         working-directory: ${{ env.KERNEL_ROOT }}
+         run: |
+           if [ -f "build/build.sh" ]; then
+-            sed -i 's/-dirty//' ./common/scripts/setlocalversion
++            :
+           else
+-            # 配置 6.1+ 内核
++            # 配置 6.1+ ABI workaround; preserve the official kernel release name.
+             sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' ./common/BUILD.bazel
+             sed -i '/kmi_symbol_list_strict_mode/d' ./common/BUILD.bazel
+             rm -rf ./common/android/abi_gki_protected_exports_*
+             sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+           fi
+ 
+-          # 配置内核名称
+-          if [ -n "${{ inputs.version }}" ]; then
+-            CLEAN_VERSION=$(echo "${{ inputs.version }}" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+//')
+-            # 6.6+：新格式 setlocalversion，保留 ${KERNELVERSION}
+-            perl -i -0777 -pe 's/(.*)echo "\$\{KERNELVERSION\}\$\{file_localversion\}\$\{config_localversion\}\$\{LOCALVERSION\}\$\{scm_version\}"/$1echo "\$\{KERNELVERSION\}'"${CLEAN_VERSION}"'"/s' ./common/scripts/setlocalversion 2>/dev/null || true
+-            # 旧格式（5.x/6.1）回退
+-            sed -i "\$s|echo \"\$res\"|echo \"${CLEAN_VERSION}\"|" ./common/scripts/setlocalversion 2>/dev/null || true
+-            sed -i '/^CONFIG_LOCALVERSION=/ s/="\([^"]*\)"/="'"$CLEAN_VERSION"'"/' ./common/arch/arm64/configs/gki_defconfig
+-          elif [ ! -f "build/build.sh" ]; then
+-            cd ./common
+-            BID="ab$((RANDOM % 90000000 + 10000000))"
+-            GHASH=$(git rev-parse --verify HEAD | cut -c1-13)
+-            # 统一内核名称格式：-androidXX-KMI-gHASH-BID-4k
+-            case "${{ inputs.android_version }}-${{ inputs.kernel_version }}" in
+-              "android14-6.1")  KMI_TAG="android14-11" ;;
+-              "android15-6.6")  KMI_TAG="android15-8" ;;
+-              "android16-6.12") KMI_TAG="android16-5" ;;
+-              *) KMI_TAG="${{ inputs.android_version }}" ;;
+-            esac
+-
+-            if [ "${{ inputs.kernel_version }}" = "6.1" ]; then
+-              # 6.1：通过 setlocalversion 注入版本名称（旧格式）
+-              KMI_LOCAL="-${KMI_TAG}-g${GHASH}-${BID}-4k"
+-              sed -i "\$s|echo \"\$res\"|echo \"${KMI_LOCAL}\"|" ./scripts/setlocalversion 2>/dev/null || true
+-              sed -i "/^CONFIG_LOCALVERSION=/ s/=\"[^\"]*\"/=\"${KMI_LOCAL}\"/" ./arch/arm64/configs/gki_defconfig 2>/dev/null || true
+-            else
+-              # 6.6+：修改 setlocalversion 注入版本名称（新格式，参考 wild_kernel）
+-              # 保留 ${KERNELVERSION} 和 ${config_localversion} 由脚本运行时解析
+-              SUFFIX="-${KMI_TAG}-g${GHASH}-${BID}"
+-              perl -i -0777 -pe 's/(.*)echo "\$\{KERNELVERSION\}\$\{file_localversion\}\$\{config_localversion\}\$\{LOCALVERSION\}\$\{scm_version\}"/$1echo "\$\{KERNELVERSION\}'"${SUFFIX}"'\$\{config_localversion\}"/s' ./scripts/setlocalversion 2>/dev/null || true
+-            fi
+-          fi
++          # Keep the upstream GKI release name; custom version suffixes are disabled.
+ 
+       # ==================== 自定义构建时间 ====================
+       - name: 设置自定义构建时间
+@@ -995,7 +830,7 @@
+             echo "::group::构建说明"
+             echo "一般情况下不会出错，除非KSU仓库和SUSFS仓库代码不同。"
+             echo "不要问，不要急，这跟你怎么努力，或者跟我反馈没关系，因为这跟我无关。"
+-            echo "等待适配即可，你有能力则自己去SUKISU仓库提交代码，"
++            echo "等待适配即可：可向 tiann/KernelSU 或 simonpunk/susfs4ksu 提交对应代码，"
+             echo "::endgroup::"
+             
+             echo "当前 KSU 最新提交日期: ${KSU_LATEST_COMMIT_DATE}"
+@@ -1035,33 +870,11 @@
+ 
+             echo "一般情况下不会出错，除非KSU仓库和SUSFS仓库代码不同。"
+             echo "不要问，不要急，这跟你怎么努力，或者跟我反馈没关系，因为这跟我无关。"
+-            echo "等待适配即可，你有能力则自己去SUKISU仓库提交代码，"
++            echo "等待适配即可：可向 tiann/KernelSU 或 simonpunk/susfs4ksu 提交对应代码，"
+             echo "当前 KSU 最新提交日期: ${KSU_LATEST_COMMIT_DATE}"
+             echo "当前 SUSFS 最新提交日期: ${SUSFS_LATEST_COMMIT_DATE}"
+             echo "如果日期不同或相差过远则补丁失效、编译失败"
+-      # ==================== KPM 补丁 (仅 SukiSU) ====================
+-      # 为 SukiSU 应用 KPM (Kernel Patch Module) 补丁
+-      - name: 应用 KPM 补丁 (SukiSU/ReSukiSU/Next)
+-        if: inputs.use_kpm && (inputs.ksu_variant == 'SukiSU' || inputs.ksu_variant == 'ReSukiSU' || inputs.ksu_variant == 'Next')
+-        run: |
+-          case "${{ inputs.android_version }}" in
+-            "android12"|"android13")
+-              if [ "${{ inputs.kernel_version }}" != "6.6" ]; then
+-                TARGET_PATH="$KERNEL_ROOT/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist"
+-              fi
+-              ;;
+-            "android14"|"android15")
+-              TARGET_PATH="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64/"
+-              ;;
+-          esac
+-
+-          cp -r $SUKISU_PATCHES/kpm/patch_linux "$TARGET_PATH/patch"
+-          cd "$TARGET_PATH"
+-          chmod 777 patch
+-          ./patch
+-          rm -rf Image
+-          mv oImage Image
+-
++      # KPM is intentionally not integrated in the official KernelSU build.
+       # ==================== 准备 Boot 镜像 ====================
+       # 复制编译产物到工作目录
+       - name: 准备 Boot 镜像
+@@ -1081,12 +894,13 @@
+           gzip -n -k -f -9 ./Image > ./Image.gz
+ 
+       # ==================== 创建 AnyKernel3 压缩包 ====================
++      # 按官方 AnyKernel3 规范打包：只包含刷入所需文件，排除 README/占位文件/.git
+       - name: 创建 AnyKernel3 压缩包
+         run: |
+           cd $ANYKERNEL3
+           ZIP_NAME="${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-AnyKernel3.zip"
+           mv ../Image ./Image
+-          zip -r "../$ZIP_NAME" ./*
++          zip -r -9 "../$ZIP_NAME" ./* -x "README.md" "*placeholder*" ".git/*"
+ 
+       # ==================== 构建 Boot 镜像 (Android 12) ====================
+       # Android 12 需要从 GKI 认证镜像中提取 ramdisk
+@@ -1179,7 +993,7 @@
+       - name: 上传构建产物
+         uses: actions/upload-artifact@v4
+         with:
+-          name: ${{ inputs.ksu_variant }}_kernel-${{ env.CONFIG }}
++          name: KernelSU_kernel-${{ env.CONFIG }}
+           path: |
+             *AnyKernel3.zip
+             *.img
+@@ -1190,7 +1004,7 @@
+         if: always() && env.REJ_COUNT > 0
+         uses: actions/upload-artifact@v4
+         with:
+-          name: ${{ inputs.ksu_variant }}_kernel-${{ env.CONFIG }}-Rejects
++          name: KernelSU_kernel-${{ env.CONFIG }}-Rejects
+           path: patch-rejects/
+           if-no-files-found: ignore
+           compression-level: 9
+--- a/.github/workflows/get-manager.yml
++++ b/.github/workflows/get-manager.yml
+@@ -3,12 +3,14 @@
+   contents: write  # Allow writing to repository contents (for pushing tags)
+   actions: read   # Allows triggering actions
+ 
++# 仅获取官方 KernelSU (tiann/KernelSU) 的管理器 APK 与 SUSFS 模块
+ on:
+   workflow_call: # This allows this workflow to be called from another workflow
+     inputs:
+       kernelsu_variant:
+-        required: true
++        required: false
+         type: string
++        default: Official
+     outputs:
+       susVer:
+         description: "The fetched SUSFS version number"
+@@ -31,123 +33,57 @@
+       CCACHE_NOHASHDIR: "true"
+       CCACHE_HARDLINK: "true"
+       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++      KSU_REPO: "tiann/KernelSU"
++      KSU_WORKFLOW: "build-manager.yml"
++      KSU_ARTIFACT: "manager"
+ 
+     steps:
+-      - name: 🧐 Debug Workflow Caller Context
+-        run: |
+-          echo "==================== DEBUG CONTEXT ===================="
+-          echo " "
+-          echo "EVENT NAME: ${{ github.event_name }}"
+-          echo " "
+-          echo "--- CALLER INFORMATION ---"
+-          echo "  - Caller Repository: ${{ github.caller_repository }}"
+-          echo "  - Caller Workflow:   ${{ github.caller_workflow }}"
+-          echo "  - Caller User:       ${{ github.triggering_actor }}"
+-          echo " "
+-          echo "--- WORKFLOW & JOB INFORMATION ---"
+-          echo "  - Current Workflow:  ${{ github.workflow }}"
+-          echo "  - Current Job ID:    ${{ github.job }}"
+-          echo "  - Current Run ID:    ${{ github.run_id }}"
+-          echo "  - Current Run Number:${{ github.run_number }}"
+-          echo " "
+-          echo "--- GIT REFERENCE INFORMATION ---"
+-          echo "  - Git Ref:           ${{ github.ref }}"
+-          echo "  - Ref Type:          ${{ github.ref_type }}"
+-          echo " "
+-          echo "======================================================="
+-          
+       - name: 安装依赖
+         uses: awalsh128/cache-apt-pkgs-action@latest
+         with:
+           packages: git curl jq
+           execute_install_scripts: true
+ 
++      - name: 校验官方 KernelSU
++        run: |
++          if [ -n "${{ inputs.kernelsu_variant }}" ] && [ "${{ inputs.kernelsu_variant }}" != "Official" ]; then
++            echo "::error::仅支持官方 KernelSU，收到: ${{ inputs.kernelsu_variant }}"
++            exit 1
++          fi
++          echo "使用官方 KernelSU: $KSU_REPO"
++
+       - name: 获取 KSU & SUSFS 版本
+         id: get_version
+         run: |
+-
+-          if [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
+-            echo "This is the Next variant"
+-            git clone https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU
+-          elif [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
+-            echo "This is the SukiSU variant"
+-            git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
+-          elif [ "${{ inputs.kernelsu_variant }}" == "ReSukiSU" ]; then
+-            echo "This is the ReSukiSU variant"
+-            git clone https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+-          elif [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
+-            echo "This is the Official"
+-            git clone https://github.com/tiann/KernelSU.git KernelSU
+-          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
+-            echo "This is the Official"
+-            git clone https://github.com/5ec1cff/KernelSU.git KernelSU
+-          else
+-            echo "Unknown variant"
+-          fi
+-
+-          VAR=$([[ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]] && echo 700 || echo 200)
++          git clone --depth=1 https://github.com/$KSU_REPO.git KernelSU
+ 
+           cd KernelSU
+ 
+-          # 计算KSU版本号
++          # 官方版本号计算规则：20000 + 提交数
+           KSU_GIT_VERSION=$(git rev-list --count HEAD)
++          KSU_VERSION=$((20000 + KSU_GIT_VERSION))
++          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
++          echo "KernelSU 版本号: $KSU_VERSION (commit count: $KSU_GIT_VERSION)"
+ 
+-          if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
+-            KSU_VERSION=$((40000 + KSU_GIT_VERSION - 2815))
+-          elif [ "${{ inputs.kernelsu_variant }}" == "ReSukiSU" ]; then
+-            KSU_VERSION=$((30700 + KSU_GIT_VERSION))
+-          elif [ "${{ inputs.kernelsu_variant }}" == "Official" ] || [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
+-            KSU_VERSION=$((20000 + KSU_GIT_VERSION))
+-          elif [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
+-            KSU_VERSION=$((30000 + KSU_GIT_VERSION))
+-          fi
+-          echo $KSU_VERSION
+-          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
++          cd ..
+ 
+-          # 计算SUSFS版本号
++          # 获取 SUSFS 版本号（取 GKI 分支的模块 module.prop）
+           INFO="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android14-6.1/ksu_module_susfs/module.prop\?ref_type\=heads"
+-          SUS_VERSION=$(curl -s $INFO | awk -F '=' '$1 == "version" { print $2 }')
+-          echo $SUS_VERSION
++          SUS_VERSION=$(curl -s "$INFO" | awk -F '=' '$1 == "version" { print $2 }')
++          echo "SUSFS 版本号: $SUS_VERSION"
+ 
+           # 导出这两个值给release
+           echo "kversion=$KSU_VERSION" >> $GITHUB_OUTPUT
+           echo "sversion=$SUS_VERSION" >> $GITHUB_OUTPUT
+ 
+-      - name: 添加 KernelSU
++      - name: 获取官方 KernelSU 管理器
+         id: add_KSU
+         continue-on-error: true
+         run: |
+-          if [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
+-            echo "KernelSU Next..."
+-            REPO="KernelSU-Next/KernelSU-Next"
+-            KSUM="manager"
+-            BRANCH="dev"
+-          elif [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
+-            echo "SukiSU..."
+-            REPO="SukiSU-Ultra/SukiSU-Ultra"
+-            KSUM="Manager"
+-          elif [ "${{ inputs.kernelsu_variant }}" == "ReSukiSU" ]; then
+-            echo "ReSukiSU..."
+-            REPO="ReSukiSU/ReSukiSU"
+-            KSUM="Manager"
+-          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
+-            echo "MKSU..."
+-            REPO="5ec1cff/KernelSU"
+-            KSUM="manager"
+-          elif [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
+-            echo "KSU..."
+-            REPO="tiann/KernelSU"
+-            KSUM="manager"
+-          fi
+-
+-          FILENAME=$([[ "${{ inputs.kernelsu_variant }}" == "Next" ]] && echo "build-manager-ci.yml" || echo "build-manager.yml")
+-          
+-          
+-          # 初始化
+           NUMBER=0
+           DOWNLOAD_LIST=""
+ 
+-          echo "开始查找包含 'manager' 产物的构建..."
++          echo "开始查找包含 '$KSU_ARTIFACT' 产物的构建..."
+           while true; do
+             echo "--------------------------------------------------"
+             echo "正在检查第 ${NUMBER} 个历史构建 (0代表最新)..."
+@@ -157,58 +93,46 @@
+               break
+             fi
+ 
+-            # 1. 获取指定顺序的成功构建的ID
+-
+-            # 对于 Next 变体，添加 branch 参数过滤
+-            if [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
+-              BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+-                "https://api.github.com/repos/$REPO/actions/workflows/$FILENAME/runs?branch=$BRANCH&status=success&per_page=1" |
+-                jq -r '.workflow_runs[0].id')
+-            else
+-              BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+-                "https://api.github.com/repos/$REPO/actions/workflows/$FILENAME/runs?status=success" |
+-                jq -r '.workflow_runs['"$NUMBER"'].id')
+-            fi
++            BUILD_ID=$(curl -s -H "Authorization: token $GH_TOKEN" \
++              "https://api.github.com/repos/$KSU_REPO/actions/workflows/$KSU_WORKFLOW/runs?status=success" |
++              jq -r --argjson n "$NUMBER" '.workflow_runs[$n].id')
+ 
+             echo "找到构建 ID: $BUILD_ID"
+ 
+-            ARTIFACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+-              "https://api.github.com/repos/$REPO/actions/runs/$BUILD_ID/artifacts")
+-
+-            # 对于 Next 变体使用精确匹配，其他变体使用模糊匹配
+-            if [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
+-              result=$(echo "$ARTIFACTS" | jq -r ".artifacts[] | select(.name == \"$KSUM\") | .name")
+-            else
+-              result=$(echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name | contains("'"$KSUM"'")) | .name')
++            if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
++              echo "未获取到构建 ID"
++              NUMBER=$((NUMBER + 1))
++              continue
+             fi
+ 
++            ARTIFACTS=$(curl -s -H "Authorization: token $GH_TOKEN" \
++              "https://api.github.com/repos/$KSU_REPO/actions/runs/$BUILD_ID/artifacts")
++
++            result=$(echo "$ARTIFACTS" | jq -r --arg name "$KSU_ARTIFACT" \
++              '.artifacts[] | select(.name | contains($name)) | .name')
++
+             if [ -z "$result" ]; then
+-              echo "没有找到包含 '$KSUM' 的项"
++              echo "没有找到包含 '$KSU_ARTIFACT' 的项"
+               NUMBER=$((NUMBER + 1))
+             else
+               echo "$result"
+-              # 对于 Next 变体使用精确匹配，其他变体使用模糊匹配
+-              if [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
+-                DOWNLOAD_LIST=$(echo "$ARTIFACTS" | jq -r ".artifacts[] | select(.name == \"$KSUM\") | \"\(.name)\t\(.archive_download_url)\"")
+-              else
+-                DOWNLOAD_LIST=$(echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name | contains("'"$KSUM"'")) | "\(.name)\t\(.archive_download_url)"')
+-              fi
++              DOWNLOAD_LIST=$(echo "$ARTIFACTS" | jq -r --arg name "$KSU_ARTIFACT" \
++                '.artifacts[] | select(.name | contains($name)) | "\(.name)\t\(.archive_download_url)"')
+               break
+             fi
++          done
+ 
+-          done
+-         
+           if [ -z "$DOWNLOAD_LIST" ]; then
+             echo "未获取到可用的 Manager artifact 下载地址列表。"
+             exit 1
+           fi
+-          
++
+           # 下载并解压所有 Manager 产物
+           echo "$DOWNLOAD_LIST" | while IFS=$'\t' read -r NAME URL; do
+             SAFE_NAME=$(echo "$NAME" | tr '/ ' '__')
+-            ZIP_NAME="${{ inputs.kernelsu_variant }}-${SAFE_NAME}(${{ env.KSU_VERSION }}).zip"
++            ZIP_NAME="KernelSU-${SAFE_NAME}($KSU_VERSION).zip"
+             echo "下载 $NAME -> $ZIP_NAME"
+-            curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "$ZIP_NAME" "$URL"
++            curl -L -H "Authorization: token $GH_TOKEN" -o "$ZIP_NAME" "$URL"
+             mkdir -p "manager-artifacts/$SAFE_NAME"
+             unzip -o "$ZIP_NAME" -d "manager-artifacts/$SAFE_NAME"
+             rm -rf "$ZIP_NAME"
+@@ -225,19 +149,18 @@
+           ARTIFACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+           "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$BUILD_ID/artifacts")
+ 
+-          DOWNLOAD_URL=$(echo "$ARTIFACTS" | jq -r '.artifacts[0].archive_download_url') 
++          DOWNLOAD_URL=$(echo "$ARTIFACTS" | jq -r '.artifacts[0].archive_download_url')
+ 
+           NAME=$(echo "$ARTIFACTS" | jq -r '.artifacts[0].name')
+           echo "SUSFS_NAME=$NAME" >> $GITHUB_ENV
+           NAME="susfs-$NAME.zip"
+-          
++
+           echo $DOWNLOAD_URL
+           echo $NAME
+           # 下载 Manager 文件
+           curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "$NAME" "$DOWNLOAD_URL"
+-          echo "$NAME 文件已下载.zip"
+-          
+-          
++          echo "$NAME 文件已下载"
++
+           # 解压 artifact zip 获取里面的模块文件
+           mkdir -p susfs-module
+           unzip "$NAME" -d susfs-temp
+@@ -256,13 +179,13 @@
+ 
+       - name: Notify on failure
+         if: steps.add_KSU.outcome == 'failure'
+-        run: echo "下载CI构建的KSU失败!"
++        run: echo "下载官方 KernelSU CI 构建的管理器失败!"
+ 
+       - name: 上传APK
+         if: steps.add_KSU.outcome == 'success'
+         uses: actions/upload-artifact@v4
+         with:
+-          name: ${{ inputs.kernelsu_variant }}-Manager(${{ env.KSU_VERSION }})
++          name: KernelSU-Manager(${{ env.KSU_VERSION }})
+           path: |
+             **/*.apk
+ 
+--- a/.github/workflows/kernel-a12-5-10.yml
++++ b/.github/workflows/kernel-a12-5-10.yml
+@@ -7,28 +7,8 @@
+ on:
+   workflow_dispatch:
+     inputs:
+-      kernelsu_variant:
+-        description: "KernelSU 变体"
+-        required: true
+-        type: choice
+-        options:
+-          - Official
+-          - Next
+-          - MKSU
+-          - SukiSU
+-          - ReSukiSU
+-        default: ReSukiSU
+-      kernelsu_branch:
+-        description: "KSU 分支"
+-        required: true
+-        type: choice
+-        options:
+-          - Stable(标准)
+-          - Dev(开发)
+-          - Other(其他/指定)
+-        default: Stable(标准)
+       version:
+-        description: "自定义版本名 (可选)"
++        description: "自定义版本名 (可选，已废弃：内核名称保持官方)"
+         required: false
+         type: string
+       build_time:
+@@ -46,24 +26,13 @@
+         required: true
+         type: boolean
+         default: true
+-      use_kpm:
+-        description: "启用 KPM 功能"
+-        required: true
+-        type: boolean
+-        default: true
+-      cancel_susfs:
+-        description: "禁用 SUSFS"
+-        required: true
++      supp_op:
++        description: "添加一加 8E 处理器支持"
++        required: false
+         type: boolean
+         default: false
+   workflow_call:
+     inputs:
+-      kernelsu_variant:
+-        required: true
+-        type: string
+-      kernelsu_branch:
+-        required: true
+-        type: string
+       version:
+         required: false
+         type: string
+@@ -77,14 +46,13 @@
+       use_bbg:
+         required: true
+         type: boolean
+-      use_kpm:
+-        required: true
+-        type: boolean
+-      cancel_susfs:
++      # 一加 8E 机型支持（默认关闭）
++      supp_op:
+         required: false
+         type: boolean
++        default: false
++      # 由 main.yml 调用时置为 true，避免重复获取管理器
+       called_from_main:
+-        description: "是否从 main.yml 调用（内部使用）"
+         required: false
+         type: boolean
+         default: false
+@@ -170,20 +138,15 @@
+       sub_level: ${{ matrix.sub_level }}
+       os_patch_level: ${{ matrix.os_patch_level }}
+       revision: ${{ matrix.revision }}
+-      ksu_variant: ${{ inputs.kernelsu_variant }}
+-      ksu_branch: ${{ inputs.kernelsu_branch }}
+       version: ${{ inputs.version || '' }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+       supp_op: false
+-      enable_susfs: ${{ !inputs.cancel_susfs }}
++      enable_susfs: true
+ 
+   # 仅在直接触发时运行，从 main.yml 调用时跳过
+   get-ksu-manager:
+     if: ${{ !inputs.called_from_main }}
+     uses: ./.github/workflows/get-manager.yml
+     secrets: inherit
+-    with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+--- a/.github/workflows/kernel-a13-5-15.yml
++++ b/.github/workflows/kernel-a13-5-15.yml
+@@ -7,28 +7,8 @@
+ on:
+   workflow_dispatch:
+     inputs:
+-      kernelsu_variant:
+-        description: "KernelSU 变体"
+-        required: true
+-        type: choice
+-        options:
+-          - Official
+-          - Next
+-          - MKSU
+-          - SukiSU
+-          - ReSukiSU
+-        default: ReSukiSU
+-      kernelsu_branch:
+-        description: "KSU 分支"
+-        required: true
+-        type: choice
+-        options:
+-          - Stable(标准)
+-          - Dev(开发)
+-          - Other(其他/指定)
+-        default: Stable(标准)
+       version:
+-        description: "自定义版本名 (可选)"
++        description: "自定义版本名 (可选，已废弃：内核名称保持官方)"
+         required: false
+         type: string
+       build_time:
+@@ -46,24 +26,13 @@
+         required: true
+         type: boolean
+         default: true
+-      use_kpm:
+-        description: "启用 KPM 功能"
+-        required: true
+-        type: boolean
+-        default: true
+-      cancel_susfs:
+-        description: "禁用 SUSFS"
+-        required: true
++      supp_op:
++        description: "添加一加 8E 处理器支持"
++        required: false
+         type: boolean
+         default: false
+   workflow_call:
+     inputs:
+-      kernelsu_variant:
+-        required: true
+-        type: string
+-      kernelsu_branch:
+-        required: true
+-        type: string
+       version:
+         required: false
+         type: string
+@@ -77,14 +46,13 @@
+       use_bbg:
+         required: true
+         type: boolean
+-      use_kpm:
+-        required: true
+-        type: boolean
+-      cancel_susfs:
++      # 一加 8E 机型支持（默认关闭）
++      supp_op:
+         required: false
+         type: boolean
++        default: false
++      # 由 main.yml 调用时置为 true，避免重复获取管理器
+       called_from_main:
+-        description: "是否从 main.yml 调用（内部使用）"
+         required: false
+         type: boolean
+         default: false
+@@ -143,20 +111,15 @@
+       kernel_version: "5.15"
+       sub_level: ${{ matrix.sub_level }}
+       os_patch_level: ${{ matrix.os_patch_level }}
+-      ksu_variant: ${{ inputs.kernelsu_variant }}
+-      ksu_branch: ${{ inputs.kernelsu_branch }}
+       version: ${{ inputs.version || '' }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+       supp_op: false
+-      enable_susfs: ${{ !inputs.cancel_susfs }}
++      enable_susfs: true
+ 
+   # 仅在直接触发时运行，从 main.yml 调用时跳过
+   get-ksu-manager:
+     if: ${{ !inputs.called_from_main }}
+     uses: ./.github/workflows/get-manager.yml
+     secrets: inherit
+-    with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+--- a/.github/workflows/kernel-a14-6-1.yml
++++ b/.github/workflows/kernel-a14-6-1.yml
+@@ -7,28 +7,8 @@
+ on:
+   workflow_dispatch:
+     inputs:
+-      kernelsu_variant:
+-        description: "KernelSU 变体"
+-        required: true
+-        type: choice
+-        options:
+-          - Official
+-          - Next
+-          - MKSU
+-          - SukiSU
+-          - ReSukiSU
+-        default: ReSukiSU
+-      kernelsu_branch:
+-        description: "KSU 分支"
+-        required: true
+-        type: choice
+-        options:
+-          - Stable(标准)
+-          - Dev(开发)
+-          - Other(其他/指定)
+-        default: Stable(标准)
+       version:
+-        description: "自定义版本名 (可选)"
++        description: "自定义版本名 (可选，已废弃：内核名称保持官方)"
+         required: false
+         type: string
+       build_time:
+@@ -46,24 +26,13 @@
+         required: true
+         type: boolean
+         default: true
+-      use_kpm:
+-        description: "启用 KPM 功能"
+-        required: true
+-        type: boolean
+-        default: true
+-      cancel_susfs:
+-        description: "禁用 SUSFS"
+-        required: true
++      supp_op:
++        description: "添加一加 8E 处理器支持"
++        required: false
+         type: boolean
+         default: false
+   workflow_call:
+     inputs:
+-      kernelsu_variant:
+-        required: true
+-        type: string
+-      kernelsu_branch:
+-        required: true
+-        type: string
+       version:
+         required: false
+         type: string
+@@ -77,14 +46,13 @@
+       use_bbg:
+         required: true
+         type: boolean
+-      use_kpm:
+-        required: true
+-        type: boolean
+-      cancel_susfs:
++      # 一加 8E 机型支持（默认关闭）
++      supp_op:
+         required: false
+         type: boolean
++        default: false
++      # 由 main.yml 调用时置为 true，避免重复获取管理器
+       called_from_main:
+-        description: "是否从 main.yml 调用（内部使用）"
+         required: false
+         type: boolean
+         default: false
+@@ -147,20 +115,15 @@
+       kernel_version: "6.1"
+       sub_level: ${{ matrix.sub_level }}
+       os_patch_level: ${{ matrix.os_patch_level }}
+-      ksu_variant: ${{ inputs.kernelsu_variant }}
+-      ksu_branch: ${{ inputs.kernelsu_branch }}
+       version: ${{ inputs.version || '' }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+       supp_op: false
+-      enable_susfs: ${{ !inputs.cancel_susfs }}
++      enable_susfs: true
+ 
+   # 仅在直接触发时运行，从 main.yml 调用时跳过
+   get-ksu-manager:
+     if: ${{ !inputs.called_from_main }}
+     uses: ./.github/workflows/get-manager.yml
+     secrets: inherit
+-    with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+--- a/.github/workflows/kernel-a15-6-6.yml
++++ b/.github/workflows/kernel-a15-6-6.yml
+@@ -7,28 +7,8 @@
+ on:
+   workflow_dispatch:
+     inputs:
+-      kernelsu_variant:
+-        description: "KernelSU 变体"
+-        required: true
+-        type: choice
+-        options:
+-          - Official
+-          - Next
+-          - MKSU
+-          - SukiSU
+-          - ReSukiSU
+-        default: ReSukiSU
+-      kernelsu_branch:
+-        description: "KSU 分支"
+-        required: true
+-        type: choice
+-        options:
+-          - Stable(标准)
+-          - Dev(开发)
+-          - Other(其他/指定)
+-        default: Stable(标准)
+       version:
+-        description: "自定义版本名 (可选)"
++        description: "自定义版本名 (可选，已废弃：内核名称保持官方)"
+         required: false
+         type: string
+       build_time:
+@@ -46,29 +26,13 @@
+         required: true
+         type: boolean
+         default: true
+-      use_kpm:
+-        description: "启用 KPM 功能"
+-        required: true
+-        type: boolean
+-        default: true
+-      cancel_susfs:
+-        description: "禁用 SUSFS"
+-        required: true
+-        type: boolean
+-        default: false
+       supp_op:
+-        description: "启用一加 8E 支持"
++        description: "添加一加 8E 处理器支持"
+         required: false
+         type: boolean
+         default: false
+   workflow_call:
+     inputs:
+-      kernelsu_variant:
+-        required: true
+-        type: string
+-      kernelsu_branch:
+-        required: true
+-        type: string
+       version:
+         required: false
+         type: string
+@@ -82,17 +46,13 @@
+       use_bbg:
+         required: true
+         type: boolean
+-      use_kpm:
+-        required: true
+-        type: boolean
+-      cancel_susfs:
+-        required: false
+-        type: boolean
++      # 一加 8E 机型支持（默认关闭）
+       supp_op:
+         required: false
+         type: boolean
++        default: false
++      # 由 main.yml 调用时置为 true，避免重复获取管理器
+       called_from_main:
+-        description: "是否从 main.yml 调用（内部使用）"
+         required: false
+         type: boolean
+         default: false
+@@ -139,20 +99,15 @@
+       kernel_version: "6.6"
+       sub_level: ${{ matrix.sub_level }}
+       os_patch_level: ${{ matrix.os_patch_level }}
+-      ksu_variant: ${{ inputs.kernelsu_variant }}
+-      ksu_branch: ${{ inputs.kernelsu_branch }}
+       version: ${{ inputs.version || '' }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+       supp_op: ${{ inputs.supp_op || false }}
+-      enable_susfs: ${{ !inputs.cancel_susfs }}
++      enable_susfs: true
+ 
+   # 仅在直接触发时运行，从 main.yml 调用时跳过
+   get-ksu-manager:
+     if: ${{ !inputs.called_from_main }}
+     uses: ./.github/workflows/get-manager.yml
+     secrets: inherit
+-    with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+--- a/.github/workflows/kernel-a16-6-12.yml
++++ b/.github/workflows/kernel-a16-6-12.yml
+@@ -7,28 +7,8 @@
+ on:
+   workflow_dispatch:
+     inputs:
+-      kernelsu_variant:
+-        description: "KernelSU 变体"
+-        required: true
+-        type: choice
+-        options:
+-          - Official
+-          - Next
+-          - MKSU
+-          - SukiSU
+-          - ReSukiSU
+-        default: ReSukiSU
+-      kernelsu_branch:
+-        description: "KSU 分支"
+-        required: true
+-        type: choice
+-        options:
+-          - Stable(标准)
+-          - Dev(开发)
+-          - Other(其他/指定)
+-        default: Stable(标准)
+       version:
+-        description: "自定义版本名 (可选)"
++        description: "自定义版本名 (可选，已废弃：内核名称保持官方)"
+         required: false
+         type: string
+       build_time:
+@@ -46,29 +26,13 @@
+         required: true
+         type: boolean
+         default: true
+-      use_kpm:
+-        description: "启用 KPM 功能"
+-        required: true
+-        type: boolean
+-        default: true
+-      cancel_susfs:
+-        description: "禁用 SUSFS"
+-        required: true
+-        type: boolean
+-        default: false
+       supp_op:
+-        description: "启用一加 8E 支持"
++        description: "添加一加 8E 处理器支持"
+         required: false
+         type: boolean
+         default: false
+   workflow_call:
+     inputs:
+-      kernelsu_variant:
+-        required: true
+-        type: string
+-      kernelsu_branch:
+-        required: true
+-        type: string
+       version:
+         required: false
+         type: string
+@@ -82,17 +46,13 @@
+       use_bbg:
+         required: true
+         type: boolean
+-      use_kpm:
+-        required: true
+-        type: boolean
+-      cancel_susfs:
+-        required: false
+-        type: boolean
++      # 一加 8E 机型支持（默认关闭）
+       supp_op:
+         required: false
+         type: boolean
++        default: false
++      # 由 main.yml 调用时置为 true，避免重复获取管理器
+       called_from_main:
+-        description: "是否从 main.yml 调用（内部使用）"
+         required: false
+         type: boolean
+         default: false
+@@ -121,20 +81,15 @@
+       kernel_version: "6.12"
+       sub_level: ${{ matrix.sub_level }}
+       os_patch_level: ${{ matrix.os_patch_level }}
+-      ksu_variant: ${{ inputs.kernelsu_variant }}
+-      ksu_branch: ${{ inputs.kernelsu_branch }}
+       version: ${{ inputs.version || '' }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: false
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+       supp_op: ${{ inputs.supp_op || false }}
+-      enable_susfs: ${{ !inputs.cancel_susfs }}
++      enable_susfs: true
+ 
+   # 仅在直接触发时运行，从 main.yml 调用时跳过
+   get-ksu-manager:
+     if: ${{ !inputs.called_from_main }}
+     uses: ./.github/workflows/get-manager.yml
+     secrets: inherit
+-    with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+--- a/.github/workflows/kernel-custom.yml
++++ b/.github/workflows/kernel-custom.yml
+@@ -11,104 +11,69 @@
+       android_version:
+         description: "Android 版本"
+         required: true
+-        输入: choice
++        type: choice
+         options:
+           - android12
+           - android13
+           - android14
+           - android15
+           - android16
+-        默认: android14
++        default: android14
+       kernel_version:
+         description: "内核版本"
+         required: true
+-        输入: choice
++        type: choice
+         options:
+           - "5.10"
+           - "5.15"
+           - "6.1"
+           - "6.6"
+           - "6.12"
+-        默认: "6.1"
++        default: "6.1"
+       sub_level:
+         description: "子版本号 (如 66, 198, X)"
+         required: true
+-        输入: string
+-        默认: "138"
++        type: string
++        default: "138"
+       os_patch_level:
+         description: "安全补丁级别 (如 2022-01, lts)"
+         required: true
+-        输入: string
+-        默认: "2025-06"
++        type: string
++        default: "2025-06"
+       revision:
+         description: "修订版本 (如 r11, 仅 5.10 需要)"
+         required: false
+-        输入: string
+-        默认: ""
++        type: string
++        default: ""
+ 
+-      # ==================== KernelSU 配置 ====================
+-      kernelsu_variant:
+-        description: "KernelSU 变体"
+-        required: true
+-        输入: choice
+-        options:
+-          - Official
+-          - Next
+-          - MKSU
+-          - SukiSU
+-          - ReSukiSU
+-        默认: ReSukiSU
+-      kernelsu_branch:
+-        description: "KSU 分支"
+-        required: true
+-        输入: choice
+-        options:
+-          - Stable(标准)
+-          - Dev(开发)
+-          - Other(其他/指定)
+-        默认: Stable(标准)
+-
+-      # ==================== 可选配置 ====================
+-      version:
+-        description: "自定义版本名 (可选)"
+-        required: false
+-        输入: string
++      # ==================== KernelSU 说明 ====================
++      # KernelSU 固定使用官方 tiann/KernelSU main 分支最新提交
+       build_time:
+         description: "自定义构建时间 (可选，N或留空=当前UTC)"
+         required: false
+-        输入: string
+-        默认: "Sun Dec 01 08:10:00 UTC 2024"
++        type: string
++        default: "Sun Dec 01 08:10:00 UTC 2024"
+ 
+       # ==================== 功能开关 ====================
+       use_zram:
+         description: "启用 ZRAM 增强算法"
+         required: true
+-        输入: boolean
+-        默认: false
++        type: boolean
++        default: false
+       use_bbg:
+         description: "启用 BBG 防格机"
+         required: true
+-        输入: boolean
+-        默认: false
+-      use_kpm:
+-        description: "启用 KPM 功能"
+-        required: true
+-        输入: boolean
+-        默认: false
+-      cancel_susfs:
+-        description: "禁用 SUSFS"
+-        required: true
+-        输入: boolean
+-        默认: false
++        type: boolean
++        default: false
+       supp_op:
+-        description: "启用一加 8E 支持"
++        description: "添加一加 8E 处理器支持"
+         required: false
+-        输入: boolean
+-        默认: false
++        type: boolean
++        default: false
+ 
+ jobs:
+   build-custom-kernel:
+-    name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}"
++    name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-KernelSU"
+     uses: ./.github/workflows/build.yml
+     secrets: inherit
+     with:
+@@ -116,19 +81,13 @@
+       kernel_version: ${{ inputs.kernel_version }}
+       sub_level: ${{ inputs.sub_level }}
+       os_patch_level: ${{ inputs.os_patch_level }}
+-      revision: ${{ inputs.revision || '' }}
+-      ksu_variant: ${{ inputs.kernelsu_variant }}
+-      ksu_branch: ${{ inputs.kernelsu_branch }}
+-      version: ${{ inputs.version || '' }}
+-      build_time: ${{ inputs.build_time || '' }}
++      revision: ${{ inputs.revision }}
++      build_time: ${{ inputs.build_time }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+-      supp_op: ${{ inputs.supp_op || false }}
+-      enable_susfs: ${{ !inputs.cancel_susfs }}
++      supp_op: ${{ inputs.supp_op }}
++      enable_susfs: true
+ 
+   get-ksu-manager:
+     uses: ./.github/workflows/get-manager.yml
+     secrets: inherit
+-    with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+--- a/.github/workflows/main.yml
++++ b/.github/workflows/main.yml
+@@ -32,36 +32,15 @@
+           - Release
+         default: Actions
+ 
+-      # ==================== KernelSU 配置 ====================
+-      kernelsu_variant:
+-        description: "KernelSU 变体"
+-        type: choice
+-        options:
+-          - SukiSU
+-          - ReSukiSU
+-          - Official
+-          - Next
+-          - MKSU
+-        default: ReSukiSU
+-      kernelsu_branch:
+-        description: "KSU 分支"
+-        type: choice
+-        options:
+-          - Stable(标准)
+-          - Dev(开发)
+-        default: Stable(标准)
+-
+-      # ==================== 可选配置 ====================
+-      version:
+-        description: "自定义版本名 (可选)"
+-        type: string
+-        default: ""
+-        required: false
++      # ==================== KernelSU 说明 ====================
++      # KernelSU 固定使用官方 tiann/KernelSU main 分支最新提交，无需选择变体。
++
+       build_time:
+         description: "自定义构建时间 (可选，N或留空=当前UTC)"
+         type: string
+         default: "Sun Dec 01 08:10:00 UTC 2024"
+         required: false
++
+       # ==================== 功能开关 ====================
+       use_zram:
+         description: "启用 ZRAM 增强算法"
+@@ -71,14 +50,6 @@
+         description: "启用 BBG 防格机"
+         type: boolean
+         default: false
+-      use_kpm:
+-        description: "启用 KPM 功能"
+-        type: boolean
+-        default: false
+-      cancel_susfs:
+-        description: "禁用 SUSFS"
+-        type: boolean
+-        default: false
+ 
+       # ==================== 构建版本选择 ====================
+       build_a12_5_10:
+@@ -108,12 +79,10 @@
+ 
+ jobs:
+   # ==================== 获取管理器 ====================
+-  # 下载最新的 KernelSU 管理器 APK 和 SUSFS 模块
++  # 下载最新的官方 KernelSU 管理器 APK 和 SUSFS 模块
+   get-manager:
+     uses: ./.github/workflows/get-manager.yml
+     secrets: inherit
+-    with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+ 
+   # ==================== Android 12 - 5.10 构建 ====================
+   build-a12-5-10:
+@@ -121,14 +90,9 @@
+     uses: ./.github/workflows/kernel-a12-5-10.yml
+     secrets: inherit
+     with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+-      kernelsu_branch: ${{ inputs.kernelsu_branch }}
+-      version: ${{ inputs.version }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+-      cancel_susfs: ${{ inputs.cancel_susfs }}
+       called_from_main: true
+ 
+   # ==================== Android 13 - 5.15 构建 ====================
+@@ -137,14 +101,9 @@
+     uses: ./.github/workflows/kernel-a13-5-15.yml
+     secrets: inherit
+     with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+-      kernelsu_branch: ${{ inputs.kernelsu_branch }}
+-      version: ${{ inputs.version }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+-      cancel_susfs: ${{ inputs.cancel_susfs }}
+       called_from_main: true
+ 
+   # ==================== Android 14 - 6.1 构建 ====================
+@@ -153,14 +112,9 @@
+     uses: ./.github/workflows/kernel-a14-6-1.yml
+     secrets: inherit
+     with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+-      kernelsu_branch: ${{ inputs.kernelsu_branch }}
+-      version: ${{ inputs.version }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+-      cancel_susfs: ${{ inputs.cancel_susfs }}
+       called_from_main: true
+ 
+   # ==================== Android 15 - 6.6 构建 ====================
+@@ -169,14 +123,9 @@
+     uses: ./.github/workflows/kernel-a15-6-6.yml
+     secrets: inherit
+     with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+-      kernelsu_branch: ${{ inputs.kernelsu_branch }}
+-      version: ${{ inputs.version }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+-      cancel_susfs: ${{ inputs.cancel_susfs }}
+       called_from_main: true
+ 
+   # ==================== Android 16 - 6.12 构建 ====================
+@@ -185,14 +134,9 @@
+     uses: ./.github/workflows/kernel-a16-6-12.yml
+     secrets: inherit
+     with:
+-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
+-      kernelsu_branch: ${{ inputs.kernelsu_branch }}
+-      version: ${{ inputs.version }}
+       build_time: ${{ inputs.build_time || '' }}
+       use_zram: ${{ inputs.use_zram }}
+       use_bbg: ${{ inputs.use_bbg }}
+-      use_kpm: ${{ inputs.use_kpm }}
+-      cancel_susfs: ${{ inputs.cancel_susfs }}
+       called_from_main: true
+ 
+   # ==================== 收集补丁冲突文件 ====================
+@@ -259,56 +203,35 @@
+ 
+     steps:
+       # ==================== 设置显示名称 ====================
+-      # 预计算各种显示名称，简化后续引用
+-      - name: 设置显示名称
+-        run: |
+-          # KSU 显示名称
+-          case "${{ inputs.kernelsu_variant }}" in
+-            "Next")      KSU_NAME="KernelSU-Next" ;;
+-            "Official")  KSU_NAME="KernelSU" ;;
+-            "MKSU")      KSU_NAME="MKSU" ;;
+-            "SukiSU")    KSU_NAME="SukiSU" ;;
+-            "ReSukiSU")  KSU_NAME="ReSukiSU" ;;
+-          esac
+-          echo "KSU_NAME=$KSU_NAME" >> $GITHUB_ENV
+-
+-          # 版本信息
+-          KSU_VER="${{ needs.get-manager.outputs.ksuVer }}"
++      - name: 设置官方 KernelSU 显示信息
++        run: |
++          echo "KSU_NAME=KernelSU" >> $GITHUB_ENV
++          echo "KPM_LINE=KPM disabled" >> $GITHUB_ENV
++          echo "HOOK_TYPE=-> KPROBE Hooks" >> $GITHUB_ENV
++          echo "MOUNT_TYPE=-> OVERLAYFS 支持" >> $GITHUB_ENV
++          echo "KSU_SUFFIX=原版" >> $GITHUB_ENV
++          echo "BRANCH_INFO=(main)" >> $GITHUB_ENV
++          echo "RELEASE_NAME=GKI内核: KernelSU + SUSFS" >> $GITHUB_ENV
++
++          # SUSFS 版本来自 get-manager 输出，缺失时使用默认值
+           SUS_VER="${{ needs.get-manager.outputs.susVer }}"
+-          echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
++          if [ -z "$SUS_VER" ]; then
++            SUS_VER="未知"
++          fi
+           echo "SUS_VER=$SUS_VER" >> $GITHUB_ENV
+ 
+-          # 功能开关显示
+-          echo "LZ4_STATUS=${{ inputs.use_zram && '开启' || '未开启' }}" >> $GITHUB_ENV
+-          echo "BBG_STATUS=${{ inputs.use_bbg && '支持' || '不支持' }}" >> $GITHUB_ENV
+-          echo "KPM_LINE=${{ inputs.use_kpm && '-> KPM 支持' || '' }}" >> $GITHUB_ENV
+-          echo "LZ4_SUFFIX=${{ inputs.use_zram && '、LZ4KD' || '' }}" >> $GITHUB_ENV
+-
+-          # Hook 类型
+-          if [ "${{ inputs.kernelsu_variant }}" = "SukiSU" ] || [ "${{ inputs.kernelsu_variant }}" = "ReSukiSU" ]; then
+-            echo "HOOK_TYPE=-> SUSFS Inline Hooks" >> $GITHUB_ENV
++          # 功能开关状态（用于发布说明表格）
++          if [ "${{ inputs.use_bbg }}" = "true" ]; then
++            echo "BBG_STATUS=已启用 / Enabled" >> $GITHUB_ENV
+           else
+-            echo "HOOK_TYPE=-> KPROBE Hooks" >> $GITHUB_ENV
+-          fi
+-
+-          # Mount 类型
+-          if [ "${{ inputs.kernelsu_variant }}" = "Official" ]; then
+-            echo "MOUNT_TYPE=-> OVERLAYFS 支持" >> $GITHUB_ENV
+-            echo "KSU_SUFFIX=原版" >> $GITHUB_ENV
++            echo "BBG_STATUS=未启用 / Disabled" >> $GITHUB_ENV
++          fi
++
++          if [ "${{ inputs.use_zram }}" = "true" ]; then
++            echo "LZ4_STATUS=已启用 / Enabled" >> $GITHUB_ENV
+           else
+-            echo "MOUNT_TYPE=-> Magic Mount 支持" >> $GITHUB_ENV
+-            echo "KSU_SUFFIX=" >> $GITHUB_ENV
+-          fi
+-
+-          # 分支显示
+-          if [ "${{ inputs.kernelsu_branch }}" = "Dev(开发)" ]; then
+-            echo "BRANCH_INFO=($KSU_VER)" >> $GITHUB_ENV
+-          else
+-            echo "BRANCH_INFO=稳定版" >> $GITHUB_ENV
+-          fi
+-
+-          # 发布标题
+-          echo "RELEASE_NAME=GKI内核: ${KSU_NAME}(${KSU_VER}) & SUSFS ${SUS_VER}" >> $GITHUB_ENV
++            echo "LZ4_STATUS=未启用 / Disabled" >> $GITHUB_ENV
++          fi
+ 
+       # ==================== 验证构建状态 ====================
+       # 确保所有选中的构建任务都成功完成
+@@ -333,43 +256,19 @@
+       - name: 检出代码
+         uses: actions/checkout@v4
+ 
+-      # ==================== 确定 KSU 分支 ====================
+-      # 根据用户选择确定实际的 Git 分支
+-      - name: 确定 KSU 分支
+-        if: inputs.kernelsu_branch == 'Dev(开发)' || inputs.kernelsu_variant == 'MKSU' || inputs.kernelsu_variant == 'SukiSU' || inputs.kernelsu_variant == 'ReSukiSU'
+-        run: |
+-          case "${{ inputs.kernelsu_variant }}" in
+-            "Official"|"MKSU") BRANCH="main" ;;
+-            "SukiSU"|"ReSukiSU") BRANCH="main" ;;
+-            "Next") BRANCH="dev" ;;
+-            *) echo "错误: 未知变体" >&2; exit 1 ;;
+-          esac
+-          echo "KSU_BRANCH=$BRANCH" >> $GITHUB_ENV
+-
+-      # ==================== 获取 KernelSU 提交信息 ====================
+-      # 获取当前使用的 KernelSU 版本的 Git 提交信息
+-      - name: 获取 KernelSU 提交信息
+-        run: |
+-          case "${{ inputs.kernelsu_variant }}" in
+-            "Official") REPO_URL="https://github.com/tiann/KernelSU.git"; REPO_URL2="tiann/KernelSU" ;;
+-            "Next") REPO_URL="https://github.com/KernelSU-Next/KernelSU-Next.git"; REPO_URL2="KernelSU-Next/KernelSU-Next" ;;
+-            "MKSU") REPO_URL="https://github.com/5ec1cff/KernelSU.git"; REPO_URL2="5ec1cff/KernelSU" ;;
+-            "SukiSU") REPO_URL="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"; REPO_URL2="SukiSU-Ultra/SukiSU-Ultra" ;;
+-            "ReSukiSU") REPO_URL="https://github.com/ReSukiSU/ReSukiSU.git"; REPO_URL2="ReSukiSU/ReSukiSU" ;;
+-          esac
+-
+-          if [[ "${{ inputs.kernelsu_branch }}" == "Stable(标准)" && "${{ inputs.kernelsu_variant }}" != "MKSU" ]]; then
+-            TAG=$(git ls-remote --tags --sort=-v:refname $REPO_URL | grep -o 'refs/tags/.*' | cut -d'/' -f3 | head -n1)
+-            KSU_REF=$TAG
+-            KSU_URL="https://github.com/$REPO_URL2/releases/tag/$TAG"
+-          else
+-            COMMIT_HASH=$(git ls-remote $REPO_URL refs/heads/${KSU_BRANCH:-main} | awk '{ print $1 }')
+-            KSU_REF=$COMMIT_HASH
+-            KSU_URL="https://github.com/$REPO_URL2/commit/$COMMIT_HASH"
+-          fi
+-
+-          echo "KSU_REF=$KSU_REF" >> $GITHUB_ENV
+-          echo "KSU_URL=$KSU_URL" >> $GITHUB_ENV
++      # ==================== 获取官方 KernelSU 提交信息 ====================
++      - name: 获取官方 KernelSU main 提交信息
++        run: |
++          REPO_URL="https://github.com/tiann/KernelSU.git"
++          COMMIT_HASH=$(git ls-remote "$REPO_URL" refs/heads/main | awk '{ print $1 }')
++          if [[ -z "$COMMIT_HASH" ]]; then
++            echo "::error::无法查询 KernelSU main 提交"
++            exit 1
++          fi
++          KSU_REF="$COMMIT_HASH"
++          KSU_URL="https://github.com/tiann/KernelSU/commit/$COMMIT_HASH"
++          echo "KSU_REF=$KSU_REF" >> "$GITHUB_ENV"
++          echo "KSU_URL=$KSU_URL" >> "$GITHUB_ENV"
+ 
+       # ==================== 获取 SUSFS 提交信息 ====================
+       # 获取各版本 SUSFS 的 Git 提交信息
+@@ -401,7 +300,7 @@
+           cat > release_body.md << EOF
+           ## 📦 本次发布内容 / Release Contents
+ 
+-          **${{ env.KSU_NAME }}** + **SUSFS ${{ env.SUS_VER }}**${{ env.LZ4_SUFFIX }}
++          **${{ env.KSU_NAME }}** + **SUSFS ${{ env.SUS_VER }}**
+ 
+           ### ✨ 功能特性 / Features
+ 
+@@ -474,7 +373,7 @@
+           <details>
+           <summary>🔗 提交信息 / Commit Info</summary>
+ 
+-          **KernelSU (${{ inputs.kernelsu_variant }})**: [${{ env.KSU_REF }}](${{ env.KSU_URL }})
++          **KernelSU (main)**: [${{ env.KSU_REF }}](${{ env.KSU_URL }})
+ 
+           **SUSFS4KSU**:
+           - gki-android12-5.10: [${{ env.COMMIT_HASH_gki_android12_5_10 }}](${{ env.COMMIT_URL_gki_android12_5_10 }})
+--- a/README-EN.md
++++ b/README-EN.md
+@@ -32,9 +32,9 @@
+ 
+ > **Note:** OnePlus ColorOS 14/15 is currently not supported. A data wipe may be required after flashing.
+ 
+-> **ReSukiSU: ReSukiSU updates more frequently than SukiSU. If SukiSU errors occur, try ReSukiSU instead.**
++> **KernelSU: integrates the latest source from the official [tiann/KernelSU](https://github.com/tiann/KernelSU) `main` branch, keeping the upstream official kernel release name (no custom suffix).**
+ >
+-> **Default variant has been switched to ReSukiSU**
++> **No KPM: neither the defconfig nor the shipped image contains KPM support.**
+ 
+ > **Android 16: Android 16 - 6.12 kernel version is now supported**
+ 
+@@ -54,38 +54,36 @@
+ 
+ ---
+ 
+-## ❗ Common Build Failure Cause (SukiSU / SUSFS Out of Sync)
++## ❗ Common Build Failure Cause (KernelSU / SUSFS Out of Sync)
+ 
+-When the following two branches update at different paces, builds may fail:
++The kernel side always integrates the **official KernelSU**, while SUSFS follows the branch matching your Android/kernel version. When the two update at different paces, builds may fail:
+ 
+-- SukiSU builtin branch: <https://github.com/SukiSU-Ultra/SukiSU-Ultra/tree/builtin>
+-- SUSFS gki-android14-6.1 branch: <https://gitlab.com/simonpunk/susfs4ksu/-/tree/gki-android14-6.1?ref_type=heads>
++- KernelSU main branch: <https://github.com/tiann/KernelSU/commits/main>
++- SUSFS branches: <https://gitlab.com/simonpunk/susfs4ksu>
+ 
+-For example: SUSFS just pushed a new commit, but SukiSU's `builtin` branch hasn't caught up yet — patching/compiling will likely fail.
++For example: SUSFS just changed its kernel patch layout, but the KernelSU-side patch has not caught up yet — patching/compiling will likely fail.
+ 
+-In such cases, you can only wait for SukiSU to follow up and complete adaptation with the latest SUSFS commit.
++In such cases, wait for upstream (KernelSU or SUSFS) to finish adapting, or pin a known-good SUSFS commit via `config/config` below.
+ 
+-<img src="assets/sukisu_eg1.png" alt="SukiSU builtin update history" width="80%">
+ <img src="assets/susfs_eg1.png" alt="SUSFS gki-android14-6.1 update history" width="80%">
+ 
+ ## 🔧 Custom Commit Pinning
+-Use the [`config/config`](config/config) file to pin SUSFS and SukiSU to specific commits.
++Use the [`config/config`](config/config) file to pin SUSFS to specific commits (KernelSU always tracks the official `main` HEAD and cannot be pinned).
+ 
+ **What is a commit?**
+ 
+-A commit is a hash string representing the state of a repository at a specific point in time. For example, setting sukisu to `4b8644515fe6d87a109129e590ccd9d33a855dca` means using the January 30th version of SukiSU to build the kernel.
++A commit is a hash string representing the state of a repository at a specific point in time. For example, setting `gki-android14-6.1` to `4b8644515fe6d87a109129e590ccd9d33a855dca` means using the SUSFS revision from that point in time.
+ 
+ **Why pin a commit?**
+ 
+ - When upstream updates introduce bugs or compatibility issues, you can roll back to a stable version
+-- When SUSFS and SukiSU versions are out of sync causing build failures, you can manually specify compatible versions
++- When KernelSU and SUSFS versions are out of sync causing build failures, you can manually specify compatible versions
+ 
+ **How to get a commit hash?**
+ 
+-- SUSFS: https://gitlab.com/simonpunk/susfs4ksu
+-- SukiSU: https://github.com/SukiSU-Ultra/SukiSU-Ultra/commits/builtin/
++- SUSFS: https://gitlab.com/simonpunk/susfs4ksu/commits/
+ 
+-Taking SUSFS as an example, first select the branch, then copy the commit hash:
++Select the branch first, then copy the commit hash:
+ 
+ ![Select branch](assets/susfs_branch.png)
+ ![Copy commit](assets/susfs_commit.png)
+@@ -96,12 +94,11 @@
+ 
+ # SUSFS commit hash per branch
+ gki-android12-5.10=
++gki-android13-5.10=
+ gki-android13-5.15=
+ gki-android14-6.1=
+ gki-android15-6.6=
+-
+-# SukiSU commit hash
+-sukisu=
++gki-android16-6.12=
+ ```
+ 
+ > Empty value = use the latest commit of that branch.
+--- a/README.md
++++ b/README.md
+@@ -32,9 +32,9 @@
+ 
+ > **注意：** 目前不支持一加 ColorOS 14、15，刷入后可能需要清除数据开机。
+ 
+-> **ReSukiSU：ReSukiSU更新比SukiSU勤快，SukiSU报错就试试ReSukiSU**
++> **KernelSU：集成官方 [tiann/KernelSU](https://github.com/tiann/KernelSU) `main` 分支最新源码，内核名称保持官方原样，不注入自定义后缀**
+ >
+-> **默认变体已切换为 ReSukiSU**
++> **不集成 KPM：defconfig 与刷入镜像均不含 KPM 功能**
+ 
+ > **Android 16：已支持 Android 16 - 6.12 内核版本**
+ 
+@@ -54,38 +54,36 @@
+ 
+ ---
+ 
+-## ❗构建失败常见原因（SukiSU / SUSFS 更新不同步）
++## ❗构建失败常见原因（KernelSU / SUSFS 更新不同步）
+ 
+-当以下两个分支的更新节奏不一致时，构建可能失败：
++内核侧固定集成**官方 KernelSU**，SUSFS 则按 Android / 内核版本匹配对应分支，两者更新节奏不一致时构建可能失败：
+ 
+-- SukiSU builtin 分支：<https://github.com/SukiSU-Ultra/SukiSU-Ultra/tree/builtin>
+-- SUSFS gki-android14-6.1 分支：<https://gitlab.com/simonpunk/susfs4ksu/-/tree/gki-android14-6.1?ref_type=heads>
++- KernelSU main 分支：<https://github.com/tiann/KernelSU/commits/main>
++- SUSFS 各版本分支：<https://gitlab.com/simonpunk/susfs4ksu>
+ 
+-例如：SUSFS 刚更新了新提交，但 SukiSU 的 `builtin` 分支还没跟进适配，这时打补丁/编译就容易失败。
++例如：SUSFS 刚更新了内核补丁格式，而官方 KernelSU 侧补丁还没跟进适配，这时打补丁/编译就容易失败。
+ 
+-如以下情况，只能等待SukiSU跟进，完成与SUSFS最新提交的适配。
++如出现以下情况，请等待上游（KernelSU 或 SUSFS）完成适配，或在下面通过 `config/config` 指定稳定的 SUSFS 提交。
+ 
+-<img src="assets/sukisu_eg1.png" alt="SukiSU builtin 更新记录" width="80%">
+ <img src="assets/susfs_eg1.png" alt="SUSFS gki-android14-6.1 更新记录" width="80%">
+ 
+ ## 🔧 自定义提交配置
+-通过 [`config/config`](config/config) 文件可以指定 SUSFS 和 SukiSU 使用特定的 commit。
++通过 [`config/config`](config/config) 文件可以指定 SUSFS 使用特定的 commit（KernelSU 固定跟随官方 `main` 最新提交，不支持固定）。
+ 
+ **什么是提交 (commit)？**
+ 
+-提交是一串哈希字符串，代表仓库在某个时间点的状态。例如将 sukisu 设为 `4b8644515fe6d87a109129e590ccd9d33a855dca`，即使用 1 月 30 日的 SukiSU 版本编译内核。
++提交是一串哈希字符串，代表仓库在某个时间点的状态。例如将 `gki-android14-6.1` 设为 `4b8644515fe6d87a109129e590ccd9d33a855dca`，即使用该时间点的 SUSFS 版本编译内核。
+ 
+ **为什么要指定提交？**
+ 
+ - 当上游仓库更新引入 bug 或兼容性问题时，可回退到稳定版本
+-- 当 SUSFS 与 SukiSU 版本不同步导致编译失败时，可手动指定兼容的版本
++- 当 KernelSU 与 SUSFS 版本不同步导致编译失败时，可手动指定兼容的版本
+ 
+ **如何获取提交哈希？**
+ 
+-- SUSFS: https://gitlab.com/simonpunk/susfs4ksu
+-- SukiSU: https://github.com/SukiSU-Ultra/SukiSU-Ultra/commits/builtin/
++- SUSFS: https://gitlab.com/simonpunk/susfs4ksu/commits/
+ 
+-以 SUSFS 为例，先选择分支，再复制对应提交的哈希值：
++先选择分支，再复制对应提交的哈希值：
+ 
+ ![选择分支](assets/susfs_branch.png)
+ ![复制提交](assets/susfs_commit.png)
+@@ -96,12 +94,11 @@
+ 
+ # SUSFS 各分支的 commit hash
+ gki-android12-5.10=
++gki-android13-5.10=
+ gki-android13-5.15=
+ gki-android14-6.1=
+ gki-android15-6.6=
+-
+-# SukiSU 的 commit hash
+-sukisu=
++gki-android16-6.12=
+ ```
+ 
+ > 留空则使用该分支的最新提交。
+--- a/config/config
++++ b/config/config
+@@ -1,5 +1,5 @@
+ # ==================== 自定义提交配置 ====================
+-# 本文件用于配置 SUSFS 和 SukiSU 仓库的自定义提交
++# 本文件用于配置 SUSFS (simonpunk/susfs4ksu) 仓库的自定义提交
+ #
+ # 使用说明:
+ #   1. 将 custom 设为 true 启用自定义提交功能
+@@ -8,8 +8,9 @@
+ #
+ # 示例:
+ #   gki-android14-6.1=abc123def456
+-#   sukisu=def789abc123
+ #
++# 说明：KernelSU 始终使用官方 tiann/KernelSU main 分支最新提交，
++#       不支持自定义提交固定，故此处不再提供 KSU 相关配置项。
+ # ================================================================
+ 
+ # 是否启用自定义提交 (true/false)
+@@ -18,11 +19,8 @@
+ # ==================== SUSFS 各分支的 commit hash ====================
+ # 仅当 custom=true 时生效
+ gki-android12-5.10=
++gki-android13-5.10=
+ gki-android13-5.15=
+ gki-android14-6.1=
+ gki-android15-6.6=
+ gki-android16-6.12=
+-
+-# ==================== SukiSU 的 commit hash ====================
+-# 仅当 custom=true 且使用 SukiSU 变体时生效
+-sukisu=

@@ -1,0 +1,125 @@
+name: 内核构建 - Android 13 (5.15)
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "自定义版本名 (可选，已废弃：内核名称保持官方)"
+        required: false
+        type: string
+      build_time:
+        description: "自定义构建时间 (可选，N或留空=当前UTC)"
+        required: false
+        type: string
+        default: "Sun Dec 01 08:10:00 UTC 2024"
+      use_zram:
+        description: "启用 ZRAM 增强算法"
+        required: true
+        type: boolean
+        default: true
+      use_bbg:
+        description: "启用 BBG 防格机"
+        required: true
+        type: boolean
+        default: true
+      supp_op:
+        description: "添加一加 8E 处理器支持"
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      version:
+        required: false
+        type: string
+      build_time:
+        required: false
+        type: string
+        default: "Sun Dec 01 08:10:00 UTC 2024"
+      use_zram:
+        required: true
+        type: boolean
+      use_bbg:
+        required: true
+        type: boolean
+      # 一加 8E 机型支持（默认关闭）
+      supp_op:
+        required: false
+        type: boolean
+        default: false
+      # 由 main.yml 调用时置为 true，避免重复获取管理器
+      called_from_main:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build-kernels-a13-5-15:
+    name: "5.15.${{ matrix.sub_level }}-${{ matrix.os_patch_level }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sub_level: "74"
+            os_patch_level: "2023-01"
+          - sub_level: "78"
+            os_patch_level: "2023-03"
+          - sub_level: "94"
+            os_patch_level: "2023-05"
+          - sub_level: "104"
+            os_patch_level: "2023-07"
+          - sub_level: "119"
+            os_patch_level: "2023-09"
+          - sub_level: "123"
+            os_patch_level: "2023-11"
+          - sub_level: "137"
+            os_patch_level: "2024-01"
+          - sub_level: "144"
+            os_patch_level: "2024-03"
+          - sub_level: "148"
+            os_patch_level: "2024-05"
+          - sub_level: "149"
+            os_patch_level: "2024-07"
+          - sub_level: "151"
+            os_patch_level: "2024-08"
+          - sub_level: "153"
+            os_patch_level: "2024-09"
+          - sub_level: "167"
+            os_patch_level: "2024-11"
+          - sub_level: "170"
+            os_patch_level: "2025-01"
+          - sub_level: "178"
+            os_patch_level: "2025-03"
+          - sub_level: "180"
+            os_patch_level: "2025-05"
+          - sub_level: "185"
+            os_patch_level: "2025-07"
+          - sub_level: "189"
+            os_patch_level: "2025-09"
+          - sub_level: "194"
+            os_patch_level: "2025-12"
+          - sub_level: "X"
+            os_patch_level: "lts"
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      android_version: "android13"
+      kernel_version: "5.15"
+      sub_level: ${{ matrix.sub_level }}
+      os_patch_level: ${{ matrix.os_patch_level }}
+      version: ${{ inputs.version || '' }}
+      build_time: ${{ inputs.build_time || '' }}
+      use_zram: ${{ inputs.use_zram }}
+      use_bbg: ${{ inputs.use_bbg }}
+      supp_op: false
+      enable_susfs: true
+
+  # 仅在直接触发时运行，从 main.yml 调用时跳过
+  get-ksu-manager:
+    if: ${{ !inputs.called_from_main }}
+    uses: ./.github/workflows/get-manager.yml
+    secrets: inherit
