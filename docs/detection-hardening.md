@@ -79,6 +79,10 @@ vc-teahouse     ×1
 1. `/sys/kernel/btf/vmlinux`（`CONFIG_DEBUG_INFO_BTF=y`，原厂也有）
    是 BTF 类型表，里面能看到内核符号名。关掉会让 vendor 的 BPF/CO-RE 程序失效，
    不能动。SUSFS 的 `HIDE_KSU_SUSFS_SYMBOLS` 只处理 kallsyms，不处理 BTF。
-2. `/proc/kallsyms`：需要 root 才能读，SUSFS 已做符号隐藏。
-3. `boot.img` 未做 AVB 签名。刷入后 Verified Boot 状态必然从 green 变 orange，
+2. 模块签名证书：每次 CI 都现场 `openssl` 生成一对密钥（`CONFIG_MODULE_SIG_ALL=y`
+   会把证书编进内核），x509 有效期就是 CI 的真实构建时间（如 `261107155219Z`），
+   和伪造的 `uname -v` 对不上。只有 root 通过 `/proc/keys` 或直接读镜像才看得到，
+   普通 App 没有这个入口。
+3. `/proc/kallsyms`：需要 root 才能读，SUSFS 已做符号隐藏。
+4. `boot.img` 未做 AVB 签名。刷入后 Verified Boot 状态必然从 green 变 orange，
    这类“系统完整性”检测和内核本身无关，属于解锁 bootloader 的固有代价。
