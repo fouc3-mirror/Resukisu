@@ -43,6 +43,13 @@ on:
       revision:
         required: false
         type: string
+      # 内核本地版本后缀（写入 CONFIG_LOCALVERSION）
+      # 留空 => 沿用 gki_defconfig 默认的 "-4k"（官方命名）
+      # 例："-g0908354dac1b-ab16143355-4k"
+      kernel_localversion:
+        required: false
+        type: string
+        default: ""
       build_time:
         required: false
         type: string
@@ -820,6 +827,21 @@ jobs:
           sed -i '/^CONFIG_KPM=/d; /^# CONFIG_KPM is not set$/d' "$DEFCONFIG"
           echo '# CONFIG_KPM is not set' >> "$DEFCONFIG"
 
+          # 内核本地版本后缀（CONFIG_LOCALVERSION）
+          # 最终版本串 = <KERNELVERSION> + kleaf 的 "-<android>-<KMI>" 前缀 + 本后缀
+          # 例：6.6.118 + "-android15-8" + "-g0908354dac1b-ab16143355-4k"
+          KERNEL_LOCALVERSION="${{ inputs.kernel_localversion }}"
+          if [ -n "$KERNEL_LOCALVERSION" ]; then
+            if grep -q '^CONFIG_LOCALVERSION=' "$DEFCONFIG"; then
+              sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"|" "$DEFCONFIG"
+            else
+              echo "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" >> "$DEFCONFIG"
+            fi
+            echo "内核本地版本后缀: $KERNEL_LOCALVERSION"
+          else
+            echo "内核本地版本后缀: 使用 gki_defconfig 默认值"
+          fi
+
           # 移除 defconfig 检查
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
@@ -962,6 +984,33 @@ jobs:
           cp "$SRC_DIR/Image" ./
           cp "$SRC_DIR/Image.lz4" ./
           gzip -n -k -f -9 ./Image > ./Image.gz
+
+      # ==================== 校验内核版本字符串 ====================
+      # 确保 CONFIG_LOCALVERSION / build_time 真的进了内核，否则直接失败而不是产出错包
+      - name: 校验内核版本字符串
+        run: |
+          RELEASE_LINE=$(strings ./bootimgs/Image | grep -m1 '^Linux version ' || true)
+          UTS_LINE=$(strings ./bootimgs/Image | grep -m1 '^#1 SMP PREEMPT ' || true)
+          echo "Linux version : $RELEASE_LINE"
+          echo "UTS_VERSION  : $UTS_LINE"
+
+          EXPECT_LOCAL="${{ inputs.kernel_localversion }}"
+          if [ -n "$EXPECT_LOCAL" ]; then
+            if ! printf '%s' "$RELEASE_LINE" | grep -qF -- "$EXPECT_LOCAL"; then
+              echo "::error::内核版本串未包含期望后缀 '$EXPECT_LOCAL'，实际: $RELEASE_LINE"
+              exit 1
+            fi
+            echo "OK: 版本串包含 $EXPECT_LOCAL"
+          fi
+
+          EXPECT_TIME="${{ inputs.build_time }}"
+          if [ -n "$EXPECT_TIME" ]; then
+            if ! printf '%s' "$UTS_LINE" | grep -qF -- "$EXPECT_TIME"; then
+              echo "::error::UTS_VERSION 未包含期望构建时间 '$EXPECT_TIME'，实际: $UTS_LINE"
+              exit 1
+            fi
+            echo "OK: UTS_VERSION 包含 $EXPECT_TIME"
+          fi
 
       # ==================== 创建 AnyKernel3 压缩包 ====================
       # 按官方 AnyKernel3 规范打包：只包含刷入所需文件，排除 README/占位文件/.git

@@ -57,7 +57,12 @@ on:
         type: string
         default: ""
       build_time:
-        description: "内核构建时间 (留空=当前 UTC，即 uname -v 显示真实时间)"
+        description: "内核构建时间，如 Thu Aug 20 09:40:32 UTC 2026 (留空=当前 UTC)"
+        required: false
+        type: string
+        default: ""
+      kernel_localversion:
+        description: "内核版本后缀，如 -g0908354dac1b-ab16143355-4k (留空=官方默认 -4k)"
         required: false
         type: string
         default: ""
@@ -110,6 +115,7 @@ jobs:
       revision: ${{ inputs.revision }}
       # 留空 => build.yml 使用当前 UTC 时间，uname -v 显示真实构建时间
       build_time: ${{ inputs.build_time }}
+      kernel_localversion: ${{ inputs.kernel_localversion }}
       use_zram: ${{ inputs.use_zram }}
       use_bbg: ${{ inputs.use_bbg }}
       supp_op: ${{ inputs.supp_op }}
