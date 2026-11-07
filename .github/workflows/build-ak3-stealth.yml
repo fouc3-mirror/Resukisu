@@ -161,8 +161,12 @@ jobs:
             fi
           }
           # 用户态能直接读到的特征
-          check_absent 'baseband_guard'  # /sys/kernel/security/lsm 里的 LSM 名
-          check_absent 'vc-teahouse'     # BBG 的上游地址
+          if [ "${{ inputs.use_bbg }}" = "false" ]; then
+            check_absent 'baseband_guard'  # /sys/kernel/security/lsm 里的 LSM 名
+            check_absent 'vc-teahouse'     # BBG 的上游地址
+          else
+            echo "INFO: BBG 已开启，baseband_guard / vc-teahouse 会出现在镜像与 LSM 列表里"
+          fi
 
           # /proc/config.gz 仍然存在（CONFIG_IKCONFIG=y），但内容必须已经是原厂 config
           python3 -c 'import gzip,sys; d=open(sys.argv[1],"rb").read(); st=d.find(b"IKCFG_ST"); ed=d.find(b"IKCFG_ED",st); assert st>0 and ed>st, "IKCFG 段缺失"; t=gzip.decompress(d[st+8:ed]).decode(); bad=[k for k in ("CONFIG_KSU","CONFIG_BBG","baseband_guard") if k in t]; assert not bad, "config.gz 仍含: %s" % bad; print("OK: /proc/config.gz 干净，%d 行" % (t.count("\n")+1)); [print("   ", l) for l in t.splitlines() if l.startswith(("CONFIG_LOCALVERSION=","CONFIG_LSM=","CONFIG_LTO_NONE","CONFIG_IKCONFIG="))]' "$BOOT"
