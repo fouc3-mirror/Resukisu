@@ -1,15 +1,14 @@
 # ========================================
 # 隐身形 AK3 打包（无反检测特征）
 # ========================================
-# 与「单版本 AK3 打包」的区别 —— 这里默认打开全部反检测项：
-#   * 关闭 CONFIG_IKCONFIG        → /proc/config.gz 不存在，
-#                                    不再向任何 App 暴露 CONFIG_KSU* / CONFIG_BBG /
-#                                    伪造的 CONFIG_LOCALVERSION
-#   * 关闭 CONFIG_KSU_SUSFS_ENABLE_LOG → 内核日志里不再有 "susfs:" 记录
-#   * 不加载 BBG                   → /sys/kernel/security/lsm 与原厂一致，
-#                                    内核镜像里也没有 baseband_guard / vc-teahouse 字符串
-#   * LTO=none                     → 与原厂 6.6 GKI 的 CONFIG_LTO_NONE=y 对齐
-# 内核版本串 / 构建时间仍按输入伪造，SUSFS 隐藏能力不变。
+# 上一版直接关掉 CONFIG_IKCONFIG，虽然 /proc/config.gz 消失了，但内核二进制
+# 也跟着变了，实测在 M332BF 上能过第一屏、第二屏后重启。这一版改成
+# **不动任何内核配置**，只在打包前把 /proc/config.gz 里那份 .config 替换成
+# 原厂内容（scripts/sanitize_ikconfig.py，原位等长重写）：
+#   * 内核镜像除那段 .rodata 外逐字节相同 → 行为与原版一致
+#   * /proc/config.gz 仍然存在、仍可读 → 依赖它的系统组件不会被惊动
+#   * 里面不再有 CONFIG_KSU* / CONFIG_KSU_SUSFS_* / CONFIG_BBG / baseband_guard
+#     以及伪造的 CONFIG_LOCALVERSION，和原厂 config 逐行一致
 # ========================================
 
 name: 隐身版 AK3 打包
@@ -68,6 +67,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_bbg:
+        description: "加载 BBG 防格机（会注册 baseband_guard LSM；关掉更干净但未验证）"
+        required: false
+        type: boolean
+        default: true
       revision:
         description: "修订版本 (如 r11，仅 Android 12 - 5.10 需要)"
         required: false
@@ -107,13 +111,11 @@ jobs:
       build_time: ${{ inputs.build_time }}
       kernel_localversion: ${{ inputs.kernel_localversion }}
       use_zram: ${{ inputs.use_zram }}
+      use_bbg: ${{ inputs.use_bbg }}
       enable_susfs: true
       supp_op: false
-      # ===== 反检测 =====
-      use_bbg: false
-      hide_kernel_config: true
-      disable_susfs_log: true
-      lto: none
+      # ===== 反检测：不改任何内核配置，只把 /proc/config.gz 的内容换成原厂 config =====
+      sanitize_config: true
 
   # ==================== 打包并与原厂特征比对 ====================
   package:
@@ -158,10 +160,12 @@ jobs:
               echo "OK: 未发现 $1"
             fi
           }
-          # 这三类是用户态真的能读到的，必须为 0
-          check_absent 'IKCFG_ST'        # /proc/config.gz 里的内嵌 .config
+          # 用户态能直接读到的特征
           check_absent 'baseband_guard'  # /sys/kernel/security/lsm 里的 LSM 名
           check_absent 'vc-teahouse'     # BBG 的上游地址
+
+          # /proc/config.gz 仍然存在（CONFIG_IKCONFIG=y），但内容必须已经是原厂 config
+          python3 -c 'import gzip,sys; d=open(sys.argv[1],"rb").read(); st=d.find(b"IKCFG_ST"); ed=d.find(b"IKCFG_ED",st); assert st>0 and ed>st, "IKCFG 段缺失"; t=gzip.decompress(d[st+8:ed]).decode(); bad=[k for k in ("CONFIG_KSU","CONFIG_BBG","baseband_guard") if k in t]; assert not bad, "config.gz 仍含: %s" % bad; print("OK: /proc/config.gz 干净，%d 行" % (t.count("\n")+1)); [print("   ", l) for l in t.splitlines() if l.startswith(("CONFIG_LOCALVERSION=","CONFIG_LSM=","CONFIG_LTO_NONE","CONFIG_IKCONFIG="))]' "$BOOT"
 
           # 下面这些只存在于镜像 .rodata，普通 App 读不到（要 root + kallsyms/BTF），
           # 而 "KernelSU" 字符串本身就无法抹除，所以只统计不拦截。
@@ -204,10 +208,9 @@ jobs:
             echo "- 版本串: \`${{ inputs.kernel_localversion }}\`"
             echo "- 构建时间: \`${{ inputs.build_time }}\`"
             echo "- SUSFS: 已启用"
-            echo "- /proc/config.gz: 已隐藏（CONFIG_IKCONFIG=n）"
-            echo "- SUSFS 内核日志: 已关闭"
-            echo "- BBG: 未加载（LSM 列表与原厂一致）"
-            echo "- LTO: none（与原厂对齐）"
+            echo "- /proc/config.gz: 仍存在，但内容已换成原厂 config（不含 CONFIG_KSU* / CONFIG_BBG）"
+            echo "- BBG: ${{ inputs.use_bbg }}"
+            echo "- 内核配置: 未改动（IKCONFIG=y / LTO / SUSFS 日志均与原厂一致）"
             echo "- KPM: 未集成"
             echo ""
             echo "下载 artifact: \`Stealth-AK3-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}\`、\`Stealth-boot-...\`"

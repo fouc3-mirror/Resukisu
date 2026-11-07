@@ -93,6 +93,13 @@ on:
         required: false
         type: string
         default: "auto"
+      # 保留 CONFIG_IKCONFIG=y（/proc/config.gz 依旧存在），但把里面的 .config
+      # 改写成原厂内容：KernelSU / SUSFS / BBG / 伪造的 LOCALVERSION 全部消失。
+      # 与 hide_kernel_config 相比不改任何内核配置，二进制除该 .rodata 段外完全相同。
+      sanitize_config:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build-kernel:
@@ -1082,6 +1089,28 @@ jobs:
           cp "$SRC_DIR/Image.lz4" ./
           gzip -n -k -f -9 ./Image > ./Image.gz
 
+      # ==================== 消毒 /proc/config.gz ====================
+      # 保持 CONFIG_IKCONFIG=y（/proc/config.gz 照旧存在，不改变任何内核行为），
+      # 只把内嵌的 .config 换成原厂内容 —— 内核镜像除这段 .rodata 外逐字节相同。
+      - name: 消毒 /proc/config.gz（保留 IKCONFIG）
+        if: inputs.sanitize_config
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/sanitize_ikconfig.py" ./bootimgs/Image ./Image
+
+          # 重新生成压缩变体，避免 gz/lz4 里还留着未消毒的 .config
+          gzip -n -k -f -9 ./Image > ./Image.gz
+          cp ./Image.gz ./bootimgs/Image.gz
+          if command -v lz4 >/dev/null 2>&1; then
+            if lz4 -f -l -9 ./Image ./Image.lz4; then
+              cp ./Image.lz4 ./bootimgs/Image.lz4
+              echo "已重新生成 Image.lz4"
+            else
+              echo "::warning::lz4 压缩失败，boot-lz4.img 仍将是未消毒版本（boot.img / AK3 不受影响）"
+            fi
+          else
+            echo "::warning::未找到 lz4，boot-lz4.img 仍将是未消毒版本（boot.img / AK3 不受影响）"
+          fi
+
       # ==================== 校验内核版本字符串 ====================
       # 确保 CONFIG_LOCALVERSION / build_time 真的进了内核，否则直接失败而不是产出错包
       - name: 校验内核版本字符串
@@ -1117,6 +1146,11 @@ jobs:
               exit 1
             fi
             echo "OK: 内核镜像不含 config.gz 数据"
+          fi
+
+          # sanitize_config：/proc/config.gz 仍在，但内容必须是干净的原厂 config
+          if [ "${{ inputs.sanitize_config }}" = "true" ]; then
+            python3 -c 'import gzip; d=open("bootimgs/Image","rb").read(); st=d.find(b"IKCFG_ST"); ed=d.find(b"IKCFG_ED",st); assert st>0 and ed>st, "IKCFG 段缺失"; t=gzip.decompress(d[st+8:ed]).decode(); assert "CONFIG_KSU" not in t and "CONFIG_BBG" not in t, "config.gz 仍含 KSU/BBG"; assert "baseband_guard" not in t, "config.gz 仍含 baseband_guard"; print("OK: /proc/config.gz 已消毒，行数", t.count("\n")+1)'
           fi
 
       # ==================== 创建 AnyKernel3 压缩包 ====================
