@@ -98,7 +98,7 @@ vc-teahouse     ×1
 （[检测项说明](https://github.com/mingzun09/Chunqiu-Detector-Problem-solution/blob/main/language/answer_zh.md)，
 官方给的解法是写 `/data/adb/tricky_store/security_patch.txt`）。
 
-### 6.2 根因：重建 boot.img 时把原厂的 AVB 属性丢了
+### 6.2 另一处差异：重建 boot.img 时把原厂的 AVB 属性丢了
 
 原厂 `boot.img`（同 ROM 的 `images/boot.img`）尾部 vbmeta 的 hash descriptor 里带着
 三条 property descriptor：
@@ -168,4 +168,29 @@ vendor=2026-10-01
 ```
 
 （也可直接删掉该文件让模块回落到系统属性；改完必须重启再测。）
+
+### 6.5 本机实测结论：26 的真正来源是 `vendor=prop`
+
+在这台 K90 Ultra 上实测（`adb` + `su` 直接查）：
+
+| 项 | 值 |
+|---|---|
+| `ro.build.version.security_patch`（system） | `2026-10-01` |
+| `ro.vendor.build.security_patch`（vendor） | `2026-09-01` ← 厂商自己就落后一个月 |
+| `ro.boot.security_patch` | 空 |
+| `/proc/config.gz` | 45,959 B，`CONFIG_KSU` 命中 0 次（消毒版已生效） |
+| `security_patch.txt` | `system=202610` / `boot=2026-10-01` / **`vendor=prop`** |
+
+`vendor=prop` 意味着证书里的 `vendorPatchLevel` 直接取 `ro.vendor.build.security_patch`，
+也就是 `2026-09-01`，与系统侧 `2026-10-01` 不一致 → 命中 26。
+这个值由模块 `ts_autorun`（开机自动跑官方那个 26 号脚本）写入，
+其 `config.sh` 里 `MODE=2`（vendor=prop）是默认值，**每次开机都会写回 mode 2**。
+
+修复：`MODE=1`（vendor 也写真实补丁日期），并立刻重跑一次脚本让文件生效，
+重启后复测。仓库里 `modules/ts_autorun/` 保存了修正后的模块（v1.2，默认 mode 1），
+避免重装旧包时又回到 mode 2。
+
+> 结论：**26 与内核无关**。内核侧能做的只有 6.3 那件事——把 boot 分区的
+> KeyMint 版本绑定属性补齐到与原厂一致（去掉证书合成模块后才用得上）。
+
 

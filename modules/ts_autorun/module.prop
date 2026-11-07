@@ -1,0 +1,6 @@
+id=ts_autorun
+name=TrickyStore 补丁脚本开机自启
+version=v1.2
+versionCode=3
+author=Deepseek Harness
+description=开机后自动执行 run.sh（原 Tampered Attestation Key(26)Pass.sh，逐字节保留），默认模式1（vendor 也写真实补丁日期），按真实补丁日期重写 /data/adb/tricky_store/security_patch.txt。
