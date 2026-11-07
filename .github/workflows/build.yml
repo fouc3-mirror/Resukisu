@@ -74,6 +74,26 @@ on:
         type: boolean
         default: false
 
+      # ==================== 反检测开关 ====================
+      # 关闭 CONFIG_IKCONFIG：.config 不再被打进内核镜像，/proc/config.gz 随之消失。
+      # 不关的话，任何 App 读 /proc/config.gz 就能看到
+      # CONFIG_KSU=y / CONFIG_KSU_SUSFS_* / CONFIG_BBG 以及伪造的 CONFIG_LOCALVERSION。
+      hide_kernel_config:
+        required: false
+        type: boolean
+        default: false
+      # 关闭 CONFIG_KSU_SUSFS_ENABLE_LOG：内核日志里不再出现 "susfs:" 打印
+      disable_susfs_log:
+        required: false
+        type: boolean
+        default: false
+      # LTO 策略：auto（默认行为，6.12 用 none，其余 thin）/ none / thin
+      # 原厂 6.6 GKI 是 CONFIG_LTO_NONE=y，要完全对齐原厂就传 none
+      lto:
+        required: false
+        type: string
+        default: "auto"
+
 jobs:
   build-kernel:
     name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-KernelSU"
@@ -105,6 +125,9 @@ jobs:
           echo "SUSFS 状态    : ${{ inputs.enable_susfs }}"
           echo "ZRAM 增强     : ${{ inputs.use_zram }}"
           echo "BBG 补丁      : ${{ inputs.use_bbg }}"
+          echo "隐藏 config.gz: ${{ inputs.hide_kernel_config }}"
+          echo "SUSFS 日志    : ${{ inputs.disable_susfs_log }}（true=关闭）"
+          echo "LTO 策略      : ${{ inputs.lto }}"
           echo "KPM 功能      : 已禁用"
           echo "Stock Config  : 自动检测 config/stock_defconfig"
           echo "========================================"
@@ -876,6 +899,29 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
 
+      # ==================== 反检测：隐藏 config.gz / SUSFS 日志 ====================
+      # 原厂内核同样带 CONFIG_IKCONFIG_PROC，但里面没有 KSU/SUSFS；
+      # 我们的 .config 会原样暴露 CONFIG_KSU=y、CONFIG_KSU_SUSFS_*、CONFIG_BBG
+      # 以及伪造的 CONFIG_LOCALVERSION，检测软件读 /proc/config.gz 即可判定内核被改。
+      - name: 反检测配置（隐藏 config.gz / SUSFS 日志）
+        if: inputs.hide_kernel_config || inputs.disable_susfs_log
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          if [ "${{ inputs.hide_kernel_config }}" = "true" ]; then
+            sed -i '/^CONFIG_IKCONFIG=/d; /^# CONFIG_IKCONFIG is not set$/d; /^CONFIG_IKCONFIG_PROC=/d; /^# CONFIG_IKCONFIG_PROC is not set$/d' "$DEFCONFIG"
+            printf '%s\n' '# CONFIG_IKCONFIG is not set' >> "$DEFCONFIG"
+            echo "已关闭 CONFIG_IKCONFIG：/proc/config.gz 将不再存在"
+          fi
+
+          if [ "${{ inputs.disable_susfs_log }}" = "true" ]; then
+            if grep -q '^CONFIG_KSU_SUSFS_ENABLE_LOG=' "$DEFCONFIG"; then
+              sed -i 's/^CONFIG_KSU_SUSFS_ENABLE_LOG=.*/# CONFIG_KSU_SUSFS_ENABLE_LOG is not set/' "$DEFCONFIG"
+            else
+              printf '%s\n' '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set' >> "$DEFCONFIG"
+            fi
+            echo "已关闭 CONFIG_KSU_SUSFS_ENABLE_LOG：内核日志不再出现 susfs 记录"
+          fi
+
       # ==================== 配置内核名称 ====================
       - name: 配置内核名称
         working-directory: ${{ env.KERNEL_ROOT }}
@@ -947,9 +993,17 @@ jobs:
             sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' ./common/build.config.gki.aarch64
             sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' ./common/build.config.gki.aarch64
 
+            # LTO 策略：auto（原行为）/ none（对齐原厂 CONFIG_LTO_NONE=y）/ thin
+            LTO_INPUT="${{ inputs.lto }}"
+            LEGACY_LTO="thin"
+            if [ "$LTO_INPUT" = "none" ]; then
+              LEGACY_LTO="none"
+            fi
+            echo "LTO 策略: input=$LTO_INPUT legacy=$LEGACY_LTO"
+
             if [ -f "build/build.sh" ]; then
               # 5.x 内核使用传统构建脚本
-              LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC="/usr/bin/ccache clang" || exit 1
+              LTO="$LEGACY_LTO" BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC="/usr/bin/ccache clang" || exit 1
             else
               # 6.1+ 内核使用 Bazel 构建
               # 提取 gki_defconfig 修改到 fragment，避免 bazel trim 检查失败
@@ -964,10 +1018,16 @@ jobs:
               if [ -s "$FRAG" ]; then
                 FRAG_FLAG="--defconfig_fragment=//common:arch/arm64/configs/ksu.fragment"
               fi
-              # 6.12+ 使用 lto=none（Rust 内核模块不兼容 thin LTO）
-              LTO_FLAG="--lto=thin"
-              if [ "${{ inputs.kernel_version }}" = "6.12" ]; then
+              # LTO：none 对齐原厂；thin 保留原行为；auto = 6.12 用 none，其余 thin
+              if [ "$LTO_INPUT" = "none" ]; then
                 LTO_FLAG="--lto=none"
+              elif [ "$LTO_INPUT" = "thin" ]; then
+                LTO_FLAG="--lto=thin"
+              else
+                LTO_FLAG="--lto=thin"
+                if [ "${{ inputs.kernel_version }}" = "6.12" ]; then
+                  LTO_FLAG="--lto=none"
+                fi
               fi
               tools/bazel build --disk_cache=/home/runner/.cache/bazel --config=fast $LTO_FLAG $FRAG_FLAG //common:kernel_aarch64_dist || exit 1
               strings ./bazel-bin/common/kernel_aarch64/Image | grep 'Linux version'
@@ -1023,6 +1083,16 @@ jobs:
               exit 1
             fi
             echo "OK: UTS_VERSION 包含 $EXPECT_TIME"
+          fi
+
+          # 反检测校验：/proc/config.gz 的数据来自 IKCFG_ST 魔数包裹的 gzip 段，
+          # 关了 CONFIG_IKCONFIG 后镜像里不应再出现该魔数。
+          if [ "${{ inputs.hide_kernel_config }}" = "true" ]; then
+            if strings ./bootimgs/Image | grep -q 'IKCFG_ST'; then
+              echo "::error::内核镜像仍内嵌内核配置数据（/proc/config.gz 会暴露 CONFIG_KSU*），隐藏失败"
+              exit 1
+            fi
+            echo "OK: 内核镜像不含 config.gz 数据"
           fi
 
       # ==================== 创建 AnyKernel3 压缩包 ====================

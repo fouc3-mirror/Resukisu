@@ -1,0 +1,207 @@
+# ========================================
+# 隐身形 AK3 打包（无反检测特征）
+# ========================================
+# 与「单版本 AK3 打包」的区别 —— 这里默认打开全部反检测项：
+#   * 关闭 CONFIG_IKCONFIG        → /proc/config.gz 不存在，
+#                                    不再向任何 App 暴露 CONFIG_KSU* / CONFIG_BBG /
+#                                    伪造的 CONFIG_LOCALVERSION
+#   * 关闭 CONFIG_KSU_SUSFS_ENABLE_LOG → 内核日志里不再有 "susfs:" 记录
+#   * 不加载 BBG                   → /sys/kernel/security/lsm 与原厂一致，
+#                                    内核镜像里也没有 baseband_guard / vc-teahouse 字符串
+#   * LTO=none                     → 与原厂 6.6 GKI 的 CONFIG_LTO_NONE=y 对齐
+# 内核版本串 / 构建时间仍按输入伪造，SUSFS 隐藏能力不变。
+# ========================================
+
+name: 隐身版 AK3 打包
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: "Android 版本"
+        required: true
+        type: choice
+        options:
+          - android12
+          - android13
+          - android14
+          - android15
+          - android16
+        default: android15
+      kernel_version:
+        description: "内核版本"
+        required: true
+        type: choice
+        options:
+          - "5.10"
+          - "5.15"
+          - "6.1"
+          - "6.6"
+          - "6.12"
+        default: "6.6"
+      sub_level:
+        description: "子版本号 (6.6.118 → 118)"
+        required: true
+        type: string
+        default: "118"
+      os_patch_level:
+        description: "安全补丁级别 (如 2026-01, lts)"
+        required: true
+        type: string
+        default: "2026-01"
+      build_time:
+        description: "内核构建时间 (留空=当前 UTC；本机原厂为 Thu Aug 20 09:40:32 UTC 2026)"
+        required: false
+        type: string
+        default: "Thu Aug 20 09:40:32 UTC 2026"
+      kernel_localversion:
+        description: "内核版本后缀 (留空=官方 -4k；本机原厂为 -g0908354dac1b-ab16143355-4k)"
+        required: false
+        type: string
+        default: "-g0908354dac1b-ab16143355-4k"
+      use_zram:
+        description: "启用 ZRAM 增强算法 (LZ4KD)"
+        required: false
+        type: boolean
+        default: false
+      revision:
+        description: "修订版本 (如 r11，仅 Android 12 - 5.10 需要)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  # ==================== 预检 ====================
+  preflight:
+    name: "预检 ${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验 ACK 分支
+        run: |
+          BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
+          echo "检查 android.googlesource.com/kernel/common 分支: $BRANCH"
+          if git ls-remote --exit-code --heads \
+              https://android.googlesource.com/kernel/common "$BRANCH" >/dev/null 2>&1; then
+            echo "分支存在: $BRANCH"
+          else
+            echo "::error::ACK 分支不存在: $BRANCH ，请检查 android_version / kernel_version / os_patch_level"
+            exit 1
+          fi
+
+  # ==================== 编译内核 ====================
+  build:
+    name: "隐身形 ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}"
+    needs: preflight
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      android_version: ${{ inputs.android_version }}
+      kernel_version: ${{ inputs.kernel_version }}
+      sub_level: ${{ inputs.sub_level }}
+      os_patch_level: ${{ inputs.os_patch_level }}
+      revision: ${{ inputs.revision }}
+      build_time: ${{ inputs.build_time }}
+      kernel_localversion: ${{ inputs.kernel_localversion }}
+      use_zram: ${{ inputs.use_zram }}
+      enable_susfs: true
+      supp_op: false
+      # ===== 反检测 =====
+      use_bbg: false
+      hide_kernel_config: true
+      disable_susfs_log: true
+      lto: none
+
+  # ==================== 打包并与原厂特征比对 ====================
+  package:
+    name: "打包 AK3"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'KernelSU_kernel-*'
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: 筛选 AK3 包与 boot.img
+        run: |
+          mkdir -p out
+          find ./artifacts -type f -name '*AnyKernel3.zip' -exec cp -v {} ./out/ \;
+          find ./artifacts -type f -name '*boot.img' -exec cp -v {} ./out/ \;
+          COUNT=$(find ./out -type f -name '*.zip' | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::没有找到 AnyKernel3 压缩包，构建可能未生成 Image"
+            exit 1
+          fi
+          ls -l ./out
+
+      - name: 反检测特征自检
+        run: |
+          BOOT=$(find ./out -type f -name '*boot.img' | head -n1)
+          if [ -z "$BOOT" ]; then
+            echo "::error::未找到 boot.img，无法自检"
+            exit 1
+          fi
+          echo "检查文件: $BOOT"
+
+          fail=0
+          check_absent() {
+            if grep -aq "$1" "$BOOT"; then
+              echo "::error::内核镜像里仍然存在特征: $1"
+              fail=1
+            else
+              echo "OK: 未发现 $1"
+            fi
+          }
+          check_absent 'IKCFG_ST'
+          check_absent 'CONFIG_KSU'
+          check_absent 'baseband_guard'
+          check_absent 'vc-teahouse'
+
+          echo "---- 内核版本串 ----"
+          grep -ao 'Linux version 6\.[0-9.]*-android1[0-9]-[0-9]*-[^ )]*' "$BOOT" | head -n1 || true
+          echo "---- UTS 版本 ----"
+          grep -ao '#1 SMP PREEMPT [A-Z][a-z][a-z] [A-Z][a-z][a-z] [ 0-9][0-9] [0-9:]* UTC [0-9]*' "$BOOT" | head -n1 || true
+
+          [ "$fail" -eq 0 ] || exit 1
+
+      - name: 上传 AK3 包
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stealth-AK3-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}
+          path: ./out/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: 上传 boot.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stealth-boot-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}
+          path: ./out/*boot.img
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: 摘要
+        run: |
+          {
+            echo "## 隐身版 AK3 打包完成"
+            echo ""
+            echo "- Android: ${{ inputs.android_version }}"
+            echo "- 内核: ${{ inputs.kernel_version }}.${{ inputs.sub_level }}"
+            echo "- 补丁级别: ${{ inputs.os_patch_level }}"
+            echo "- 版本串: \`${{ inputs.kernel_localversion }}\`"
+            echo "- 构建时间: \`${{ inputs.build_time }}\`"
+            echo "- SUSFS: 已启用"
+            echo "- /proc/config.gz: 已隐藏（CONFIG_IKCONFIG=n）"
+            echo "- SUSFS 内核日志: 已关闭"
+            echo "- BBG: 未加载（LSM 列表与原厂一致）"
+            echo "- LTO: none（与原厂对齐）"
+            echo "- KPM: 未集成"
+            echo ""
+            echo "下载 artifact: \`Stealth-AK3-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}\`、\`Stealth-boot-...\`"
+          } >> $GITHUB_STEP_SUMMARY
