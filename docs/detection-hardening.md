@@ -155,40 +155,39 @@ props: com.android.build.boot.os_version=15
 kernel identical: True
 ```
 
-### 6.4 用户态还有一层（用了 TrickyStore/TEESimulator 才需要）
+### 6.4 用户态还有一层（有证书合成模块时）
 
-如果设备上装了证书合成类模块（TrickyStore / TEESimulator / OhMyKeymint 等），
-证书链是模块自己生成的，patch 标签取自 `/data/adb/tricky_store/security_patch.txt`，
-和内核无关。该文件不存在或过期时同样命中 26，需要写成：
+设备装了证书合成类模块（TrickyStore / TEESimulator / OhMyKeymint 等）时，
+证书链由模块自己生成，patch 标签取自 `/data/adb/tricky_store/security_patch.txt`。
 
-```
-system=202610
-boot=2026-10-01
-vendor=2026-10-01
-```
+### 6.5 实测结论与最终决定：不修，26 是小米已知误报
 
-（也可直接删掉该文件让模块回落到系统属性；改完必须重启再测。）
-
-### 6.5 本机实测结论：26 的真正来源是 `vendor=prop`
-
-在这台 K90 Ultra 上实测（`adb` + `su` 直接查）：
+在这台 K90 Ultra 上实测（`adb` + `su`）：
 
 | 项 | 值 |
 |---|---|
 | `ro.build.version.security_patch`（system） | `2026-10-01` |
 | `ro.vendor.build.security_patch`（vendor） | `2026-09-01` ← 厂商自己就落后一个月 |
 | `ro.boot.security_patch` | 空 |
-| `/proc/config.gz` | 45,959 B，`CONFIG_KSU` 命中 0 次（消毒版已生效） |
-| `security_patch.txt` | `system=202610` / `boot=2026-10-01` / **`vendor=prop`** |
 
-`vendor=prop` 意味着证书里的 `vendorPatchLevel` 直接取 `ro.vendor.build.security_patch`，
-也就是 `2026-09-01`，与系统侧 `2026-10-01` 不一致 → 命中 26。
-这个值由模块 `ts_autorun`（开机自动跑官方那个 26 号脚本）写入，
-其 `config.sh` 里 `MODE=2`（vendor=prop）是默认值，**每次开机都会写回 mode 2**。
+之前用 `ts_autorun` 模块把 `security_patch.txt` 写成
+`system=202610` / `boot=2026-10-01` / `vendor=2026-10-01`，再用 `resetprop`
+把 `ro.boot.security_patch`、`ro.vendor.build.security_patch` 对齐到
+`2026-10-01`，26 确实会消失（重启后复测只剩 USB 调试 + 风险应用）。
 
-修复：`MODE=1`（vendor 也写真实补丁日期），并立刻重跑一次脚本让文件生效，
-重启后复测。仓库里 `modules/ts_autorun/` 保存了修正后的模块（v1.2，默认 mode 1），
-避免重装旧包时又回到 mode 2。
+**但这不划算，已撤销：**
+
+- 春秋检测器文档对 26 的说明是“小米/红米 2026-03 前后更新的系统，构建时间与
+  安全补丁时间本身就不一致，**不管是否 root 都会报（26）→ 无视即可**”
+  （`answer_zh.md`）。也就是说，原厂小米报 26 才是常态，不报反而是改过的证据。
+- 检测器里另有 `[hook]Resetprop modified`（属性被 resetprop 动态改写）和
+  “属性区空洞”（动态改属性会留下空洞）两条专门抓这种操作；用 `resetprop`
+  伪造属性去消一个已知误报是负收益。
+
+因此仓库不再提供 `ts_autorun` 模块；设备侧删除
+`/data/adb/tricky_store/security_patch.txt`、停用模块并重启，
+`ro.boot.security_patch` 回到空、`ro.vendor.build.security_patch` 回到
+`2026-09-01`，26 按文档“无视即可”。
 
 > 结论：**26 与内核无关**。内核侧能做的只有 6.3 那件事——把 boot 分区的
 > KeyMint 版本绑定属性补齐到与原厂一致（去掉证书合成模块后才用得上）。
