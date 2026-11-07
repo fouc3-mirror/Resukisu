@@ -101,6 +101,27 @@ on:
         type: boolean
         default: false
 
+      # ==================== Boot 分区安全补丁元数据 ====================
+      # KeyMint 版本绑定（AOSP: Version information in AVB properties）：
+      # bootloader 从 boot 分区的 AVB 属性里读
+      #   com.android.build.boot.os_version
+      #   com.android.build.boot.security_patch
+      # 再交给 TEE 里的 KeyMint，KeyMint 把它写进密钥证明证书的 bootPatchLevel 标签。
+      # 重建 boot.img 时若不带这两项（原厂 boot.img 是带的），证书里的 boot 补丁标签
+      # 就是空值/0，与 ro.build.version.security_patch 对不上，检测器会命中
+      # "Tampered Attestation Key(26)"（证书 patch 标签与系统属性不一致）。
+      # 留空 => os_version 取 android_version 的数字，security_patch 取 <os_patch_level>-01。
+      # 本机原厂 boot.img 的值：os_version=15，security_patch=2026-09-01；
+      # 系统侧 ro.build.version.security_patch=2026-10-01，所以这里要显式传 2026-10-01 做同步。
+      boot_os_version:
+        required: false
+        type: string
+        default: ""
+      boot_security_patch:
+        required: false
+        type: string
+        default: ""
+
 jobs:
   build-kernel:
     name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-KernelSU"
@@ -1203,23 +1224,97 @@ jobs:
       - name: 构建 Boot 镜像 (Android 13+)
         if: inputs.android_version == 'android13' || inputs.android_version == 'android14' || inputs.android_version == 'android15'
         working-directory: bootimgs
+        env:
+          BOOT_OS_VERSION_IN: ${{ inputs.boot_os_version }}
+          BOOT_SECURITY_PATCH_IN: ${{ inputs.boot_security_patch }}
         run: |
           gzip -n -k -f -9 ./Image > ./Image.gz
 
+          # ---- KeyMint 版本绑定所需的 boot 分区元数据 ----
+          # 原厂 boot.img 的 AVB 属性里有：
+          #   com.android.build.boot.os_version     = 15
+          #   com.android.build.boot.security_patch = 2026-09-01
+          # 缺失时 bootloader 没有 boot 分区的 OS 版本/补丁级别可交给 KeyMint，
+          # 密钥证明证书的 bootPatchLevel 标签就会对不上系统属性（检测项 26）。
+          ANDROID_NUM="${{ inputs.android_version }}"
+          ANDROID_NUM="${ANDROID_NUM#android}"
+          BOOT_OS_VERSION="${BOOT_OS_VERSION_IN:-$ANDROID_NUM}"
+          BOOT_SECURITY_PATCH="${BOOT_SECURITY_PATCH_IN:-${{ inputs.os_patch_level }}-01}"
+          BOOT_PATCH_MONTH="${BOOT_SECURITY_PATCH:0:7}"
+          if [ "$BOOT_OS_VERSION" = "${BOOT_OS_VERSION#*.}" ]; then
+            BOOT_OS_VERSION_STR="${BOOT_OS_VERSION}.0.0"
+          else
+            BOOT_OS_VERSION_STR="$BOOT_OS_VERSION"
+          fi
+          echo "boot AVB 属性 : os_version=$BOOT_OS_VERSION  security_patch=$BOOT_SECURITY_PATCH"
+          echo "boot 头字段   : os_version=$BOOT_OS_VERSION_STR  os_patch_level=$BOOT_PATCH_MONTH"
+          AVB_PROPS="--prop com.android.build.boot.os_version:${BOOT_OS_VERSION} --prop com.android.build.boot.security_patch:${BOOT_SECURITY_PATCH}"
+
           # 创建普通 boot.img
-          $MKBOOTIMG --header_version 4 --kernel Image --output boot.img
-          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
+          $MKBOOTIMG --header_version 4 --kernel Image --output boot.img --os_version "$BOOT_OS_VERSION_STR" --os_patch_level "$BOOT_PATCH_MONTH"
+          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH $AVB_PROPS
           cp ./boot.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot.img
 
           # 创建 gzip 压缩的 boot.img
-          $MKBOOTIMG --header_version 4 --kernel Image.gz --output boot-gz.img
-          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-gz.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
+          $MKBOOTIMG --header_version 4 --kernel Image.gz --output boot-gz.img --os_version "$BOOT_OS_VERSION_STR" --os_patch_level "$BOOT_PATCH_MONTH"
+          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-gz.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH $AVB_PROPS
           cp ./boot-gz.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot-gz.img
 
           # 创建 lz4 压缩的 boot.img
-          $MKBOOTIMG --header_version 4 --kernel Image.lz4 --output boot-lz4.img
-          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-lz4.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
+          $MKBOOTIMG --header_version 4 --kernel Image.lz4 --output boot-lz4.img --os_version "$BOOT_OS_VERSION_STR" --os_patch_level "$BOOT_PATCH_MONTH"
+          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-lz4.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH $AVB_PROPS
           cp ./boot-lz4.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot-lz4.img
+
+      # ==================== 校验 Boot 镜像的安全补丁属性 ====================
+      # 确保重建后的 boot.img 与原厂一样带 com.android.build.boot.* 的版本/补丁属性，
+      # 否则 KeyMint 证书里的 bootPatchLevel 会缺标签（检测项 26 的根因）。
+      - name: 校验 Boot 镜像安全补丁属性
+        if: inputs.android_version == 'android13' || inputs.android_version == 'android14' || inputs.android_version == 'android15'
+        working-directory: bootimgs
+        run: |
+          python3 - <<'PY'
+          import struct, sys
+
+          KEYS = ("com.android.build.boot.os_version",
+                  "com.android.build.boot.security_patch")
+
+          def avb_props(path):
+              d = open(path, "rb").read()
+              tail = d[-64:]
+              assert tail[:4] == b"AVBf", "%s: 没有 AVB footer" % path
+              off, size = struct.unpack(">QQ", tail[12:28])
+              vb = d[off:off + size]
+              auth = struct.unpack(">I", vb[12:16])[0]
+              aux = struct.unpack(">I", vb[16:20])[0]
+              desc = vb[256 + auth + aux:]
+              strs, cur = [], b""
+              for ch in desc:
+                  if ch == 0:
+                      if cur:
+                          strs.append(cur.decode("latin1"))
+                      cur = b""
+                  else:
+                      cur += bytes([ch])
+              out = {}
+              for i, s in enumerate(strs):
+                  for k in KEYS:
+                      if s.endswith(k) and i + 1 < len(strs):
+                          out[k] = strs[i + 1]
+              return out
+
+          for name in ("boot.img", "boot-gz.img", "boot-lz4.img"):
+              p = avb_props(name)
+              print("%-14s %s" % (name, p))
+              missing = [k for k in KEYS if not p.get(k)]
+              if missing:
+                  print("::error::%s 缺少 AVB 属性: %s" % (name, ", ".join(missing)))
+                  sys.exit(1)
+              if len(p["com.android.build.boot.security_patch"]) != 10:
+                  print("::error::%s 的 security_patch 不是 YYYY-MM-DD: %r"
+                        % (name, p["com.android.build.boot.security_patch"]))
+                  sys.exit(1)
+          print("OK: boot.img 已带上与原厂一致的 KeyMint 版本绑定属性")
+          PY
 
       # ==================== 收集补丁冲突文件 ====================
       # 收集所有 .rej 文件用于调试补丁失败问题

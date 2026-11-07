@@ -77,6 +77,11 @@ on:
         required: false
         type: string
         default: ""
+      boot_security_patch:
+        description: "boot 分区 AVB 属性 com.android.build.boot.security_patch（须与系统 ro.build.version.security_patch 一致；本机 2026-10-01，对应检测项 26）"
+        required: false
+        type: string
+        default: "2026-10-01"
 
 jobs:
   # ==================== 预检 ====================
@@ -112,6 +117,8 @@ jobs:
       kernel_localversion: ${{ inputs.kernel_localversion }}
       use_zram: ${{ inputs.use_zram }}
       use_bbg: ${{ inputs.use_bbg }}
+      boot_os_version: ""
+      boot_security_patch: ${{ inputs.boot_security_patch }}
       enable_susfs: true
       supp_op: false
       # ===== 反检测：不改任何内核配置，只把 /proc/config.gz 的内容换成原厂 config =====
@@ -185,6 +192,48 @@ jobs:
 
           [ "$fail" -eq 0 ] || exit 1
 
+      # KeyMint 版本绑定：证书里的 bootPatchLevel 来自 boot 分区的 AVB 属性，
+      # 缺了就会被检测器判成 "Tampered Attestation Key(26)"。
+      - name: 校验 boot.img 的 KeyMint 版本绑定属性
+        run: |
+          BOOT=$(find ./out -type f -name '*boot.img' | head -n1)
+          python3 - "$BOOT" "${{ inputs.boot_security_patch }}" <<'PY'
+          import struct, sys
+
+          path, want_spl = sys.argv[1], sys.argv[2]
+          KEYS = ("com.android.build.boot.os_version",
+                  "com.android.build.boot.security_patch")
+          d = open(path, "rb").read()
+          tail = d[-64:]
+          assert tail[:4] == b"AVBf", "没有 AVB footer"
+          off, size = struct.unpack(">QQ", tail[12:28])
+          vb = d[off:off + size]
+          auth = struct.unpack(">I", vb[12:16])[0]
+          aux = struct.unpack(">I", vb[16:20])[0]
+          desc = vb[256 + auth + aux:]
+          strs, cur = [], b""
+          for ch in desc:
+              if ch == 0:
+                  if cur:
+                      strs.append(cur.decode("latin1"))
+                  cur = b""
+              else:
+                  cur += bytes([ch])
+          props = {}
+          for i, s in enumerate(strs):
+              for k in KEYS:
+                  if s.endswith(k) and i + 1 < len(strs):
+                      props[k] = strs[i + 1]
+          print("AVB 属性:", props)
+          missing = [k for k in KEYS if not props.get(k)]
+          if missing:
+              print("::error::boot.img 缺少 AVB 属性: %s" % ", ".join(missing))
+              sys.exit(1)
+          print("security_patch = %s（系统侧应为 %s）"
+                % (props[KEYS[1]], want_spl))
+          print("OK: KeyMint 版本绑定属性齐全")
+          PY
+
       - name: 上传 AK3 包
         uses: actions/upload-artifact@v4
         with:
@@ -215,6 +264,7 @@ jobs:
             echo "- /proc/config.gz: 仍存在，但内容已换成原厂 config（不含 CONFIG_KSU* / CONFIG_BBG）"
             echo "- BBG: ${{ inputs.use_bbg }}"
             echo "- 内核配置: 未改动（IKCONFIG=y / LTO / SUSFS 日志均与原厂一致）"
+            echo "- boot 分区安全补丁属性: os_version=\`${{ inputs.android_version }}\` / security_patch=\`${{ inputs.boot_security_patch }}\`（KeyMint 版本绑定，对应检测项 26）"
             echo "- KPM: 未集成"
             echo ""
             echo "下载 artifact: \`Stealth-AK3-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}\`、\`Stealth-boot-...\`"
