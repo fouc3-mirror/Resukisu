@@ -919,7 +919,31 @@ jobs:
             else
               printf '%s\n' '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set' >> "$DEFCONFIG"
             fi
-            echo "已关闭 CONFIG_KSU_SUSFS_ENABLE_LOG：内核日志不再出现 susfs 记录"
+
+            # 上游 susfs 的 fs/susfs.c 在关闭 CONFIG_KSU_SUSFS_ENABLE_LOG 时只定义了
+            # SUSFS_LOGI / SUSFS_LOGE，SUSFS_LOGI_RL / SUSFS_LOGE_RL 漏掉了，
+            # 直接编译会报 "call to undeclared function 'SUSFS_LOGI_RL'"。
+            # 这里在公共头文件里补上无操作版本（开启日志时整段被 #ifndef 跳过）。
+            SUSFS_H="$KERNEL_ROOT/common/include/linux/susfs.h"
+            if [ ! -f "$SUSFS_H" ]; then
+              echo "::error::找不到 $SUSFS_H，无法关闭 SUSFS 日志"
+              exit 1
+            fi
+            if ! grep -q 'define SUSFS_LOGI_RL' "$SUSFS_H"; then
+              cat >> "$SUSFS_H" <<'EOF'
+          #ifndef CONFIG_KSU_SUSFS_ENABLE_LOG
+          /* Fallback no-op log macros: upstream omits the *_RL variants without ENABLE_LOG. */
+          #ifndef SUSFS_LOGI_RL
+          #define SUSFS_LOGI_RL(fmt, ...)
+          #endif
+          #ifndef SUSFS_LOGE_RL
+          #define SUSFS_LOGE_RL(fmt, ...)
+          #endif
+          #endif
+          EOF
+            fi
+            grep -q 'define SUSFS_LOGI_RL' "$SUSFS_H" || { echo "::error::SUSFS 日志宏补丁失败"; exit 1; }
+            echo "已关闭 CONFIG_KSU_SUSFS_ENABLE_LOG 并补上 SUSFS_LOGI_RL/SUSFS_LOGE_RL 空实现"
           fi
 
       # ==================== 配置内核名称 ====================
