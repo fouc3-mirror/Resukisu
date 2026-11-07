@@ -79,3 +79,22 @@ mv -f "$tmp" "$OUT" || { echo "替换失败 (replace failed)"; rm -f "$tmp"; exi
 
 echo "已生成 $OUT ($OUT generated successfully)"
 cat "$OUT"
+
+# ---- 让证书里的三个补丁标签与对应系统属性一致 ----
+# 证书标签来源：system/boot/vendor -> osPatchLevel / bootPatchLevel / vendorPatchLevel
+# 检测器（春秋 #26）逐项比对：
+#   osPatchLevel     <-> ro.build.version.security_patch
+#   vendorPatchLevel <-> ro.vendor.build.security_patch
+#   bootPatchLevel   <-> ro.boot.security_patch
+# 本机实测：vendor 属性是 2026-09-01（比系统 SPL 落后一个月）、ro.boot.security_patch 干脆不存在，
+# 于是证书里的 2026-10-01 和它们对不上 -> 命中 Tampered Attestation Key(26)。
+# 这里把两个属性对齐到系统 SPL（与上面写入 security_patch.txt 的值同源）。
+RESETPROP="$(command -v resetprop 2>/dev/null || true)"
+[ -n "$RESETPROP" ] || RESETPROP=/data/adb/ksu/bin/resetprop
+if [ -x "$RESETPROP" ]; then
+    "$RESETPROP" ro.boot.security_patch "$patch_date_full" || echo "resetprop ro.boot.security_patch 失败"
+    "$RESETPROP" ro.vendor.build.security_patch "$patch_date_full" || echo "resetprop ro.vendor.build.security_patch 失败"
+    echo "已对齐 ro.boot.security_patch / ro.vendor.build.security_patch = $patch_date_full"
+else
+    echo "未找到 resetprop，跳过属性对齐"
+fi

@@ -1227,6 +1227,9 @@ jobs:
         env:
           BOOT_OS_VERSION_IN: ${{ inputs.boot_os_version }}
           BOOT_SECURITY_PATCH_IN: ${{ inputs.boot_security_patch }}
+          # boot 分区实际大小（字节）。原厂 boot_a = 0x6000000 = 100663296。
+          # 用仓库变量覆盖，避免 boot.img 小于分区导致 AVB footer 不在分区末尾。
+          BOOT_PART_SIZE: ${{ vars.BOOT_PARTITION_SIZE || '67108864' }}
         run: |
           gzip -n -k -f -9 ./Image > ./Image.gz
 
@@ -1252,17 +1255,17 @@ jobs:
 
           # 创建普通 boot.img
           $MKBOOTIMG --header_version 4 --kernel Image --output boot.img --os_version "$BOOT_OS_VERSION_STR" --os_patch_level "$BOOT_PATCH_MONTH"
-          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH $AVB_PROPS
+          $AVBTOOL add_hash_footer --partition_name boot --partition_size "$BOOT_PART_SIZE" --image boot.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH $AVB_PROPS
           cp ./boot.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot.img
 
           # 创建 gzip 压缩的 boot.img
           $MKBOOTIMG --header_version 4 --kernel Image.gz --output boot-gz.img --os_version "$BOOT_OS_VERSION_STR" --os_patch_level "$BOOT_PATCH_MONTH"
-          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-gz.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH $AVB_PROPS
+          $AVBTOOL add_hash_footer --partition_name boot --partition_size "$BOOT_PART_SIZE" --image boot-gz.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH $AVB_PROPS
           cp ./boot-gz.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot-gz.img
 
           # 创建 lz4 压缩的 boot.img
           $MKBOOTIMG --header_version 4 --kernel Image.lz4 --output boot-lz4.img --os_version "$BOOT_OS_VERSION_STR" --os_patch_level "$BOOT_PATCH_MONTH"
-          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-lz4.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH $AVB_PROPS
+          $AVBTOOL add_hash_footer --partition_name boot --partition_size "$BOOT_PART_SIZE" --image boot-lz4.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH $AVB_PROPS
           cp ./boot-lz4.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot-lz4.img
 
       # ==================== 校验 Boot 镜像的安全补丁属性 ====================
@@ -1271,9 +1274,11 @@ jobs:
       - name: 校验 Boot 镜像安全补丁属性
         if: inputs.android_version == 'android13' || inputs.android_version == 'android14' || inputs.android_version == 'android15'
         working-directory: bootimgs
+        env:
+          BOOT_PART_SIZE: ${{ vars.BOOT_PARTITION_SIZE || '67108864' }}
         run: |
           python3 - <<'PY'
-          import struct, sys
+          import os, struct, sys
 
           KEYS = ("com.android.build.boot.os_version",
                   "com.android.build.boot.security_patch")
@@ -1282,11 +1287,13 @@ jobs:
               d = open(path, "rb").read()
               tail = d[-64:]
               assert tail[:4] == b"AVBf", "%s: 没有 AVB footer" % path
-              off, size = struct.unpack(">QQ", tail[12:28])
+              # AvbFooter: magic(4) ver(8) original_image_size(8) vbmeta_offset(8) vbmeta_size(8)
+              off, size = struct.unpack(">QQ", tail[20:36])
               vb = d[off:off + size]
-              auth = struct.unpack(">I", vb[12:16])[0]
-              aux = struct.unpack(">I", vb[16:20])[0]
-              desc = vb[256 + auth + aux:]
+              # AvbVBMetaImageHeader: magic(4) ver_major(4) ver_minor(4) auth(8) aux(8) algo(4)
+              auth = struct.unpack(">Q", vb[12:20])[0]
+              aux = struct.unpack(">Q", vb[20:28])[0]
+              desc = vb[256 + auth:256 + auth + aux]
               strs, cur = [], b""
               for ch in desc:
                   if ch == 0:
@@ -1313,7 +1320,14 @@ jobs:
                   print("::error::%s 的 security_patch 不是 YYYY-MM-DD: %r"
                         % (name, p["com.android.build.boot.security_patch"]))
                   sys.exit(1)
-          print("OK: boot.img 已带上与原厂一致的 KeyMint 版本绑定属性")
+              want = int(os.environ.get("BOOT_PART_SIZE") or 0)
+              got = os.path.getsize(name)
+              if want and got != want:
+                  print("::error::%s 大小 %d != boot 分区 %d，AVB footer 不在分区末尾"
+                        % (name, got, want))
+                  sys.exit(1)
+              print("      size=%d (= boot 分区大小)" % got)
+          print("OK: boot.img 属性齐全，且尺寸等于 boot 分区大小")
           PY
 
       # ==================== 收集补丁冲突文件 ====================
