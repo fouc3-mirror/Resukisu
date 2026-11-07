@@ -78,7 +78,7 @@ jobs:
   build-kernel:
     name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-KernelSU"
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
 
     # ==================== 环境变量配置 ====================
     # ccache 配置用于加速重复编译
@@ -203,6 +203,19 @@ jobs:
           key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.sub_level }}-ccache-${{ github.sha }}
           restore-keys: |
             ${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.sub_level }}-ccache-
+
+      # ==================== 缓存 bazel 磁盘缓存 ====================
+      # 6.1+ 走 bazel，编译产物缓存在 ~/.cache/bazel；6.x 不经过 ccache，
+      # 冷编译耗时波动大（13~50+ 分钟），缓存后重复构建显著变快
+      - name: 恢复 bazel 磁盘缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazel
+          key: bazel-${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-${{ github.sha }}
+          restore-keys: |
+            bazel-${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-
+            bazel-${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.sub_level }}-
+            bazel-${{ inputs.android_version }}-${{ inputs.kernel_version }}-
 
       # ==================== 缓存工具链 ====================
       # 缓存 AOSP 构建工具，避免每次重新下载
@@ -915,8 +928,8 @@ jobs:
       - name: 构建——如出错为该KSU暂时未同步SUSFS代码或编译时错误(等待该KSU仓库修复)
         uses: nick-fields/retry@v3
         with:
-          timeout_minutes: 30
-          max_attempts: 3
+          timeout_minutes: 90
+          max_attempts: 2
           retry_on: timeout
           command: |
             echo "::group::构建说明"
