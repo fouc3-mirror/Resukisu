@@ -107,15 +107,23 @@ print("  setup.sh via curl && bash -s -- \"$KSU_REF\": yes")
 print("  KSU_REF=main (latest source): yes")
 
 print()
-print("== 5/6 official AnyKernel3 packaging ==")
-if "https://github.com/osm0sis/AnyKernel3.git" not in build:
-    fail("build.yml does not clone official osm0sis/AnyKernel3")
-if 'ANYKERNEL_BRANCH="master"' not in build:
-    fail("build.yml does not use AnyKernel3 master branch")
+print("== 5/6 GKI-safe AnyKernel3 packaging ==")
+if 'ANYKERNEL_REPO="https://github.com/WildKernels/AnyKernel3.git"' not in build:
+    fail("build.yml does not clone a GKI-configured AnyKernel3")
+if 'ANYKERNEL_BRANCH="gki-2.0"' not in build:
+    fail("build.yml does not use the GKI AnyKernel3 branch")
+# The Galaxy Nexus example config must never end up in the shipped zip.
+if "omap_hsmmc" not in build or "device.name1=maguro" not in build:
+    fail("build.yml does not detect the generic AnyKernel3 example config")
+for token in ("BLOCK=auto;", "IS_SLOT_DEVICE=auto;", "RAMDISK_COMPRESSION=auto;"):
+    if token not in build:
+        fail("GKI anykernel.sh template is missing %r" % token)
 if 'zip -r -9 "../$ZIP_NAME" ./* -x "README.md" "*placeholder*" ".git/*"' not in build:
     fail("AnyKernel3 zip does not follow the official exclusion rules")
-print("  repo osm0sis/AnyKernel3, branch master: yes")
-print("  zip excludes README.md / *placeholder* / .git: yes")
+print("   repo WildKernels/AnyKernel3, branch gki-2.0: yes")
+print("   generic example anykernel.sh detected and replaced: yes")
+print("   GKI template uses auto block/slot detection: yes")
+print("   zip excludes README.md / *placeholder* / .git: yes")
 
 print()
 print("== 6/6 SUSFS forced on ==")

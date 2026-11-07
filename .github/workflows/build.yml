@@ -234,13 +234,74 @@ jobs:
       # 克隆 AnyKernel3、SUSFS、各种补丁仓库
       - name: 克隆依赖仓库
         run: |
-          ANYKERNEL_BRANCH="master"
+          # ==================== AnyKernel3 ====================
+          # 必须是「已按 GKI 配置好」的 AnyKernel3：
+          #   - BLOCK/is_slot_device 走自动检测，而不是写死某个机型的分区路径
+          #   - split_boot + 有 ramdisk 才 write_boot，否则 flash_boot（GKI header v4 / init_boot 设备）
+          #   - 带 GKI 内核版本闸门，避免误刷非 GKI 设备
+          # 官方 osm0sis 仓库 master 的 anykernel.sh 是 Galaxy Nexus 示例
+          # （BLOCK=/dev/block/platform/omap/...、device.name1=maguro），
+          # 直接用于 GKI 会被 do.devicecheck 拒绝或写错分区，因此优先用 GKI 配置版本，
+          # 并在检测到示例配置时替换为 GKI 安全模板。
+          ANYKERNEL_REPO="https://github.com/WildKernels/AnyKernel3.git"
+          ANYKERNEL_BRANCH="gki-2.0"
           SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
           SUSFS_BRANCH="gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}"
 
-          echo "克隆 AnyKernel3 (官方 osm0sis, 分支: $ANYKERNEL_BRANCH)..."
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
+          echo "克隆 AnyKernel3 ($ANYKERNEL_REPO, 分支: $ANYKERNEL_BRANCH)..."
+          git clone --depth=1 "$ANYKERNEL_REPO" -b "$ANYKERNEL_BRANCH"
           rm -rf AnyKernel3/.git
+
+          # 防御：若不是 GKI 配置（例如换成官方 osm0sis master），替换为 GKI 模板
+          if grep -q 'omap_hsmmc\|device.name1=maguro' AnyKernel3/anykernel.sh; then
+            echo "检测到通用示例 anykernel.sh，替换为 GKI 配置"
+            cat > AnyKernel3/anykernel.sh <<'AK3EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## GKI configuration: auto block/slot detection, no device-specific ramdisk edits
+
+          properties() { '
+          kernel.string=GKI KernelSU + SUSFS
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=
+          device.name2=
+          device.name3=
+          device.name4=
+          device.name5=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          BLOCK=auto;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          NO_MAGISK_CHECK=1;
+
+          . tools/ak3-core.sh;
+
+          # 仅允许 GKI 内核版本，防止误刷到非 GKI 设备
+          kernel_version=$(cat /proc/version | awk -F '-' '{print $1}' | awk '{print $3}')
+          case "$kernel_version" in
+            5.10*|5.15*|6.1*|6.6*|6.12*) ;;
+            *) abort "  -> 非 GKI 设备或内核版本不受支持: $kernel_version" ;;
+          esac
+
+          split_boot;
+          if ls "$SPLITIMG"/ramdisk.cpio* >/dev/null 2>&1; then
+            unpack_ramdisk;
+            write_boot;
+          else
+            flash_boot;
+          fi;
+          AK3EOF
+          else
+            echo "使用 AnyKernel3 自带的 GKI 配置"
+          fi
 
           # 克隆 SUSFS，并按其分支确定内核补丁文件名
           clone_susfs() {
