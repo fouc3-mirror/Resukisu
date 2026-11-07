@@ -1,0 +1,166 @@
+# ========================================
+# 单版本 AK3 打包（反检测项可逐个开关）
+# ========================================
+# 用途：定位“哪个反检测开关导致某机型异常”。
+# 与 build-ak3-stealth.yml 的区别是把四个反检测项都暴露成输入，
+# 每次只翻一个开关，就能确定是 /proc/config.gz 隐藏、BBG、SUSFS 日志还是 LTO 引起的问题。
+# ========================================
+
+name: 单版本 AK3 打包（开关版）
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: "Android 版本"
+        required: true
+        type: choice
+        options:
+          - android12
+          - android13
+          - android14
+          - android15
+          - android16
+        default: android15
+      kernel_version:
+        description: "内核版本"
+        required: true
+        type: choice
+        options:
+          - "5.10"
+          - "5.15"
+          - "6.1"
+          - "6.6"
+          - "6.12"
+        default: "6.6"
+      sub_level:
+        description: "子版本号 (6.6.118 → 118)"
+        required: true
+        type: string
+        default: "118"
+      os_patch_level:
+        description: "安全补丁级别 (如 2026-01, lts)"
+        required: true
+        type: string
+        default: "2026-01"
+      build_time:
+        description: "内核构建时间 (留空=当前 UTC)"
+        required: false
+        type: string
+        default: "Thu Aug 20 09:40:32 UTC 2026"
+      kernel_localversion:
+        description: "内核版本后缀 (留空=官方 -4k)"
+        required: false
+        type: string
+        default: "-g0908354dac1b-ab16143355-4k"
+      hide_kernel_config:
+        description: "隐藏 /proc/config.gz（CONFIG_IKCONFIG=n）"
+        required: false
+        type: boolean
+        default: false
+      use_bbg:
+        description: "加载 BBG 防格机（会注册 baseband_guard LSM）"
+        required: false
+        type: boolean
+        default: true
+      disable_susfs_log:
+        description: "关闭 SUSFS 内核日志（CONFIG_KSU_SUSFS_ENABLE_LOG=n）"
+        required: false
+        type: boolean
+        default: false
+      lto:
+        description: "LTO 策略：auto=thin(6.12 用 none) / thin / none"
+        required: false
+        type: choice
+        options:
+          - auto
+          - thin
+          - none
+        default: auto
+
+jobs:
+  preflight:
+    name: "预检 ${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验 ACK 分支
+        run: |
+          BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
+          echo "检查 android.googlesource.com/kernel/common 分支: $BRANCH"
+          if git ls-remote --exit-code --heads \
+              https://android.googlesource.com/kernel/common "$BRANCH" >/dev/null 2>&1; then
+            echo "分支存在: $BRANCH"
+          else
+            echo "::error::ACK 分支不存在: $BRANCH"
+            exit 1
+          fi
+
+  build:
+    name: "开关版 ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }} cfg=${{ inputs.hide_kernel_config }} bbg=${{ inputs.use_bbg }} log=${{ inputs.disable_susfs_log }} lto=${{ inputs.lto }}"
+    needs: preflight
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      android_version: ${{ inputs.android_version }}
+      kernel_version: ${{ inputs.kernel_version }}
+      sub_level: ${{ inputs.sub_level }}
+      os_patch_level: ${{ inputs.os_patch_level }}
+      revision: ""
+      build_time: ${{ inputs.build_time }}
+      kernel_localversion: ${{ inputs.kernel_localversion }}
+      use_zram: false
+      supp_op: false
+      enable_susfs: true
+      use_bbg: ${{ inputs.use_bbg }}
+      hide_kernel_config: ${{ inputs.hide_kernel_config }}
+      disable_susfs_log: ${{ inputs.disable_susfs_log }}
+      lto: ${{ inputs.lto }}
+
+  package:
+    name: "打包 AK3"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'KernelSU_kernel-*'
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: 筛选 AK3 包与 boot.img
+        run: |
+          mkdir -p out
+          find ./artifacts -type f -name '*AnyKernel3.zip' -exec cp -v {} ./out/ \;
+          find ./artifacts -type f -name '*boot.img' -exec cp -v {} ./out/ \;
+          COUNT=$(find ./out -type f -name '*.zip' | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::没有找到 AnyKernel3 压缩包"
+            exit 1
+          fi
+          ls -l ./out
+
+      - name: 特征统计
+        run: |
+          BOOT=$(find ./out -type f -name '*boot.img' | head -n1)
+          echo "检查文件: $BOOT"
+          for s in IKCFG_ST baseband_guard vc-teahouse 'susfs:[' CONFIG_KSU; do
+            n=$(grep -ao "$s" "$BOOT" | wc -l)
+            echo "  $s = $n"
+          done
+          grep -ao 'Linux version 6\.[0-9.]*-android1[0-9]-[0-9]*-[^ )]*' "$BOOT" | head -n1 || true
+          grep -ao '#1 SMP PREEMPT [A-Z][a-z][a-z] [A-Z][a-z][a-z] [ 0-9][0-9] [0-9:]* UTC [0-9]*' "$BOOT" | head -n1 || true
+
+      - name: 上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: Toggle-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-cfg${{ inputs.hide_kernel_config }}-bbg${{ inputs.use_bbg }}-log${{ inputs.disable_susfs_log }}-lto${{ inputs.lto }}
+          path: |
+            ./out/*.zip
+            ./out/*boot.img
+          if-no-files-found: error
+          compression-level: 0
