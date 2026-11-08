@@ -1,4 +1,4 @@
-# 发布说明：Android 15 / 6.6 GKI 内核（KernelSU + SUSFS v2.3.0）
+# 发布说明：Android 15 / 6.6 GKI 内核（KernelSU + SUSFS v2.4.0）
 
 ## 1. 概览
 
@@ -7,7 +7,7 @@
 | 内核版本 | `6.6.118-android15-8-g0908354dac1b-ab16143355-4k` |
 | 构建时间 | `#1 SMP PREEMPT Thu Aug 20 09:40:32 UTC 2026` |
 | Root 方案 | 官方 KernelSU（`tiann/KernelSU` main） |
-| 隐藏 | SUSFS v2.3.0（SUS_PATH / SUS_MOUNT / SUS_KSTAT / SUS_MAP / OPEN_REDIRECT / SPOOF_UNAME / SPOOF_CMDLINE / AVC log spoofing） |
+| 隐藏 | SUSFS v2.4.0（SUS_PATH / SUS_MOUNT / SUS_KSTAT / SUS_MAP / OPEN_REDIRECT / SPOOF_UNAME / SPOOF_CMDLINE / AVC log spoofing） |
 | 兼容命令 | `add_sus_mount (0x55560)`、`add_try_umount (0x55580)` |
 | `/proc/config.gz` | 原厂内容（打包时消毒） |
 | BBG 防格机 | 可选，本版开启 |
@@ -77,10 +77,26 @@ kern_path(path, LOOKUP_FOLLOW)
   → set_bit(AS_FLAGS_SUS_MOUNT /* bit 34 */, &inode->i_mapping->flags)
 ```
 
-`AS_FLAGS_SUS_MOUNT` 是 susfs 保留、v2.3.0 未使用的位，不与 SUS_PATH(33) / SUS_KSTAT(35) /
+`AS_FLAGS_SUS_MOUNT` 是 susfs 保留、v2.3.0 / v2.4.0 未使用的位，不与 SUS_PATH(33) / SUS_KSTAT(35) /
 OPEN_REDIRECT(36) / SUS_MAP(39) 冲突。`fs/proc_namespace.c` 的三个 show 函数据此跳过该挂载，
 非 ksu 进程读 `mounts`、`mountinfo`、`mountstats` 时整行消失；标记打在 inode 上，
 同一文件的所有 bind mount 一并隐藏。
+
+**视口规则（`susfs_hide_sus_mnts_for_current()`）**
+
+上游的过滤条件只有一个：`!susfs_is_current_ksu_domain()`。HyperOS 的 `zygote_next`
+不 unshare，isolated / sandboxed 进程（uid 90000–99999）会共享 init 的命名空间并继承
+其中的 bind mount，这时仅靠 domain 判定不一定能覆盖，因此把规则显式化成：
+
+| 读者 | 视图 |
+|---|---|
+| uid 0（root） | 完整 |
+| ksu domain（`u:r:ksu:s0`） | 完整 |
+| uid 90000–99999（isolated / sandboxed） | 过滤 |
+| 其他 | 过滤 |
+
+对应地把 `fs/proc_namespace.c` 里三处 `!susfs_is_current_ksu_domain()` 换成
+`susfs_hide_sus_mnts_for_current()`。
 
 **`add_try_umount`（0x55580）—— 卸载**
 
@@ -141,7 +157,7 @@ OK: 0x55560 / 0x55580 的实现已编入内核
 
 ```sh
 # 1) 版本
-su -c '/data/adb/ksu/bin/ksu_susfs show version'      # v2.3.0
+su -c '/data/adb/ksu/bin/ksu_susfs show version'      # v2.4.0
 
 # 2) 造一个手动挂载点
 su -c 'mkdir -p /data/local/tmp/mnt_test && mount --bind /system/bin/true /data/local/tmp/mnt_test'
@@ -166,7 +182,7 @@ su -c 'umount /data/local/tmp/mnt_test' 2>/dev/null
 
 ## 5. 给模块作者
 
-可依赖的命令（`ksu_susfs` v2.3.0）：
+可依赖的命令（`ksu_susfs` v2.4.0）：
 
 | 命令 | 作用 |
 |---|---|

@@ -64,6 +64,16 @@ hooks=$(grep -c 'susfs_is_sus_mount(mnt)' "$PN" || true)
 [ "$hooks" -ge 3 ] || die "proc_namespace.c 钩子数量异常: $hooks（期望 3）"
 log "proc_namespace.c 钩子数量: $hooks"
 
+# 视口判定：把 "仅 ksu domain 免过滤" 换成显式规则
+# （root 与 ksu domain 看全部；其余一律过滤，含 isolated/sandboxed uid 90000-99999）
+if ! grep -q 'susfs_hide_sus_mnts_for_current' "$PN"; then
+    sed -i '/extern bool susfs_is_sus_mount(struct vfsmount \*mnt);/a extern bool susfs_hide_sus_mnts_for_current(void);' "$PN"
+fi
+sed -i 's/if (likely(!susfs_is_current_ksu_domain()))/if (likely(susfs_hide_sus_mnts_for_current()))/g' "$PN"
+gate=$(grep -c 'if (likely(susfs_hide_sus_mnts_for_current()))' "$PN" || true)
+[ "$gate" -ge 3 ] || die "proc_namespace.c 视口判定补丁失败: $gate（期望 3）"
+log "proc_namespace.c 视口判定已改为 susfs_hide_sus_mnts_for_current(): $gate 处"
+
 # --- 3. KernelSU 命令分发：补回 0x55560 / 0x55580 -------------------------
 python3 - "$KSU/kernel/supercall/dispatch.c" <<'PY'
 import sys

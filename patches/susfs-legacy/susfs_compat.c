@@ -82,6 +82,9 @@ extern int path_umount(struct path *path, int flags);
 /* owned by fs/susfs.c, we only test it to warn users */
 extern struct static_key_false susfs_is_hide_sus_mnts_for_non_su_procs_enabled;
 
+/* owned by the KernelSU SELinux glue */
+extern bool susfs_is_current_ksu_domain(void);
+
 /* ABI_v2000: what the v2.x ksu_susfs binary sends for CMD_SUSFS_ADD_SUS_MOUNT */
 struct st_susfs_sus_mount_legacy {
 	char target_pathname[SUSFS_MAX_LEN_PATHNAME];
@@ -104,6 +107,34 @@ struct susfs_compat_umount_entry {
 
 static LIST_HEAD(LH_LEGACY_TRY_UMOUNT);
 static DEFINE_MUTEX(susfs_compat_mutex_try_umount);
+
+/**
+ * susfs_hide_sus_mnts_for_current - should the caller get the filtered view?
+ *
+ * Expected semantics: only the ksu domain (su) and uid 0 keep the full mount
+ * list; everyone else gets the susfs filtered one.
+ *
+ * The upstream gate is just "!susfs_is_current_ksu_domain()", which leaves a
+ * hole on HyperOS: zygote_next does not unshare the mount namespace, so the
+ * isolated/sandboxed processes it spawns (uid 90000-99999, e.g.
+ * u:r:isolated_app:s0) share init's namespace and can inherit bind mounts that
+ * were made there.  Check the uid explicitly so those processes are hidden
+ * even if the domain check does not classify them as "not ksu".
+ */
+bool susfs_hide_sus_mnts_for_current(void)
+{
+	unsigned int uid = current_uid().val;
+
+	/* isolated / sandboxed app processes: uid 90000-99999 */
+	if (uid >= 90000 && uid <= 99999)
+		return true;
+
+	/* root keeps the full view, as documented */
+	if (uid == 0)
+		return false;
+
+	return !susfs_is_current_ksu_domain();
+}
 
 /**
  * susfs_is_sus_mount - check whether a mount was hand-added as a sus mount

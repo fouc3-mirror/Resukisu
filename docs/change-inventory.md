@@ -11,7 +11,7 @@
 
 ## 1. 一句话
 
-把构建链从 **SUKISU** 换成 **官方 KernelSU + 官方 AnyKernel3**，SUSFS 固定 v2.3.0 系列补丁，
+把构建链从 **SUKISU** 换成 **官方 KernelSU + 官方 AnyKernel3**，SUSFS 跟随上游 v2.x（当前 v2.4.0），
 叠加一层反检测加固（`/proc/config.gz` 消毒、日志/符号处理、LTO 与 LOCALVERSION 对齐原厂），
 并补回 SUSFS v2.x 被删除的 `add_sus_mount` / `add_try_umount` 两条命令。
 
@@ -63,7 +63,9 @@ susfs4ksu v2.2.0 重构 sus_mount 后，内核删除了这两条命令的分发�
 
 - `patches/susfs-legacy/susfs_compat.c`：`susfs_add_sus_mount()`（inode 标记 → 从非 ksu 进程
   的 mounts/mountinfo/mountstats 隐藏）、`susfs_add_try_umount()`（链表 + 在
-  `ksu_handle_umount()` 时 `path_umount()`）、`susfs_is_sus_mount()`
+  `ksu_handle_umount()` 时 `path_umount()`）、`susfs_is_sus_mount()`、
+  `susfs_hide_sus_mnts_for_current()`（视口规则：root 与 ksu domain 看全部，
+  其余含 isolated/sandboxed uid 90000–99999 一律过滤）
 - `scripts/apply_susfs_legacy_cmds.sh`：构建期注入（幂等、能力检测、锚点校验）
 - `build.yml`：调用注入脚本 + `.config` 断言 + `Image` 符号校验
 

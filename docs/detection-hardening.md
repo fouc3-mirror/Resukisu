@@ -201,7 +201,7 @@ su -c "/data/adb/ksu/bin/ksu_susfs add_sus_mount /apex/com.android.art/bin/dex2o
 [-] CMD: '0x55560', SUSFS operation not supported, please enable it in kernel
 ```
 
-`CONFIG_KSU_SUSFS_SUS_MOUNT=y` 明明是开的，`ksu_susfs show version` 也返回 `v2.3.0`。
+`CONFIG_KSU_SUSFS_SUS_MOUNT=y` 明明是开的，`ksu_susfs show version` 也返回 `v2.4.0`。
 
 ### 7.2 原因：上游重构把命令删了，用户态却还留着
 

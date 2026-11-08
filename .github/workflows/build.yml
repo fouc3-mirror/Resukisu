@@ -1132,7 +1132,7 @@ jobs:
             echo "本配置没有启用 SUSFS 兼容命令补丁（老分支/未适用），跳过校验"
             exit 0
           fi
-          for sym in susfs_is_sus_mount susfs_add_sus_mount susfs_add_try_umount susfs_legacy_run_try_umount; do
+          for sym in susfs_is_sus_mount susfs_add_sus_mount susfs_add_try_umount susfs_legacy_run_try_umount susfs_hide_sus_mnts_for_current; do
             n=$(strings ./bootimgs/Image | grep -c "$sym" || true)
             echo "符号 $sym 出现次数: $n"
             if [ "$n" -eq 0 ]; then
