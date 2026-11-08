@@ -48,6 +48,7 @@
 #include <linux/path.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
@@ -77,6 +78,9 @@ extern struct static_key_true susfs_is_log_enabled;
 
 /* path_umount() lives in fs/namespace.c and is used by KernelSU as well */
 extern int path_umount(struct path *path, int flags);
+
+/* owned by fs/susfs.c, we only test it to warn users */
+extern struct static_key_false susfs_is_hide_sus_mnts_for_non_su_procs_enabled;
 
 /* ABI_v2000: what the v2.x ksu_susfs binary sends for CMD_SUSFS_ADD_SUS_MOUNT */
 struct st_susfs_sus_mount_legacy {
