@@ -230,7 +230,7 @@ susfs4ksu 在 v2.2.0 重构了 sus_mount：不再由用户态逐条上报挂载�
 | 命令 | 实现 |
 |---|---|
 | `0x55560` `add_sus_mount` | `kern_path()` 定位 inode，打上 `AS_FLAGS_SUS_MOUNT`(bit 34)；`fs/proc_namespace.c` 三个 show 函数在原有 `mnt_id >= 2000000000` 判断后追加 `\|\| susfs_is_sus_mount(mnt)`，把该挂载从 `mounts/mountinfo/mountstats` 里隐藏——与 susfs v1.x 的语义一致 |
-| `0x55580` `add_try_umount` | v2.x 已没有“逐路径 umount 列表”，卸载由 KernelSU 的 `kernel_umount` 负责；这里只做 ABI 兼容，校验路径后返回 0，并在日志里提示 `hide_sus_mnts_for_non_su_procs` 未开时该挂载不会隐藏 |
+| `0x55580` `add_try_umount` | **真卸载**：路径记进内核链表，`ksu_handle_umount()` 里对每个正在切换到 app uid 的进程调用 `susfs_legacy_run_try_umount()` → `kern_path()` + `path_umount()`（`mnt_mode=1` 用 `MNT_DETACH`）；同时把 inode 标成 sus mount，所以即使还没起过 app（或卸载失败）也能先从 `mountinfo` 里隐藏，双保险 |
 
 两个结构体按 `ABI_v2000` 布局实现（`char[256]` + 附加字段 + `int err`），
 并把结果写回用户态 `info.err`，所以旧脚本拿到的是 `rc=0`。
@@ -239,13 +239,19 @@ susfs4ksu 在 v2.2.0 重构了 sus_mount：不再由用户态逐条上报挂载�
 
 1. `.config` 里必须同时有 `CONFIG_KSU_SUSFS=y` 和 `CONFIG_KSU_SUSFS_SUS_MOUNT=y`；
 2. 编出来的 `Image` 里必须能 `strings` 到 `susfs_is_sus_mount` /
-   `susfs_add_sus_mount` / `susfs_add_try_umount`（防止被 `#ifdef` 掉）。
+   `susfs_add_sus_mount` / `susfs_add_try_umount` /
+   `susfs_legacy_run_try_umount`（防止被 `#ifdef` 掉）。
 
 ### 7.4 结论
 
-* 对**检测**而言这两条命令不是必需的：ksu 自己创建的挂载（含 LSPosed 的
-  dex2oat 绑定）在 v2.x 里已经自动隐藏；
-* 对**兼容性**而言必需：模块/脚本里写死 `add_sus_mount` 的地方会因
-  `rc!=0` 报错甚至中止，所以内核侧把这条 ABI 补回来。
+* **ksu 自己创建的挂载**（含 LSPosed 的 dex2oat 绑定）在 v2.x 里本来就自动隐藏
+  （`mnt_id >= 2000000000`），这两条命令对它们只是 ABI 兼容；
+* **手动挂载点**才是这两条命令真正的用武之地，而且是真实生效、不是只返回 0：
+  `add_sus_mount` 让该挂载项从所有非 ksu 进程的 `mounts/mountinfo/mountstats`
+  里消失；`add_try_umount` 除了立刻隐藏，还会在每个 app 进程的命名空间里
+  `path_umount()` 掉它（`mnt_mode=1` 用 `MNT_DETACH`）；
+* 验收方法：从 **非 root** 视角（`adb shell`，uid 2000）看
+  `/proc/self/mountinfo`，手动挂的路径应当看不到；`su`（ksu domain）里仍然可见，
+  这是设计如此。
 
 

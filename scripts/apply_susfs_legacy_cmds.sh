@@ -107,8 +107,41 @@ grep -q 'CMD_SUSFS_ADD_SUS_MOUNT' "$KSU/kernel/supercall/dispatch.c" || die "dis
 grep -q 'CMD_SUSFS_ADD_TRY_UMOUNT' "$KSU/kernel/supercall/dispatch.c" || die "dispatch.c 补丁失败"
 grep -q 'CONFIG_KSU_SUSFS_SUS_MOUNT' "$COMMON/fs/susfs_compat.c" || die "susfs_compat.c 缺少配置守卫"
 
+# --- 4. ksu_handle_umount：真正把 try_umount 的路径卸载掉 -------------------
+KU="$KSU/kernel/feature/kernel_umount.c"
+[ -f "$KU" ] || die "找不到 $KU"
+python3 - "$KU" <<'PY'
+import sys
+import pathlib
+
+path = pathlib.Path(sys.argv[1])
+src = path.read_text()
+
+if "susfs_legacy_run_try_umount" in src:
+    print("[susfs-legacy] kernel_umount.c 已包含 try_umount 钩子，跳过")
+    sys.exit(0)
+
+anchor = "    revert_creds(saved);\n"
+if src.count(anchor) != 1:
+    sys.exit("[susfs-legacy][error] kernel_umount.c 中没能唯一定位 revert_creds(saved);")
+
+block = (
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+    "    {\n"
+    "        /* susfs legacy CMD_SUSFS_ADD_TRY_UMOUNT list */\n"
+    "        extern void susfs_legacy_run_try_umount(void);\n"
+    "        susfs_legacy_run_try_umount();\n"
+    "    }\n"
+    "#endif\n"
+    "\n"
+)
+path.write_text(src.replace(anchor, block + anchor))
+print("[susfs-legacy] kernel_umount.c 已接上 susfs_legacy_run_try_umount()")
+PY
+grep -q 'susfs_legacy_run_try_umount' "$KU" || die "kernel_umount.c 钩子失败"
+
 if [ -n "${GITHUB_ENV:-}" ]; then
     echo "SUSFS_LEGACY_COMPAT=1" >> "$GITHUB_ENV"
 fi
 
-log "SUSFS 兼容命令已就绪 (0x55560 / 0x55580)"
+log "SUSFS 兼容命令已就绪 (0x55560 隐藏挂载 / 0x55580 记录并卸载)"
