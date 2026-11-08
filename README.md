@@ -54,6 +54,7 @@ Wiki 涵盖内容：
 
 本仓库内的补充文档：
 - [SUSFS v2.x 兼容命令（`0x55560` / `0x55580`）发布说明](docs/release-susfs-legacy.md) —— 手动挂载点隐藏/卸载
+- [变更清单（相对上游的全部改动）](docs/change-inventory.md)
 - [反检测分析：为什么“原厂内核不暴露，自编译内核暴露”](docs/detection-hardening.md)
 
 ---

@@ -288,3 +288,27 @@ device-backup/bak-vendor_boot_a.img 100,663,296 B
 - [x] boot.img 96 MB / AVB footer 在末尾 / `15` + `2026-10-01`
 - [ ] 真机刷入并跑完 §7.2 的 1–6 步（发布前补）
 - [ ] 发布页附上本文件与两个产物的 sha256
+
+---
+
+## 11. 附：本仓库相对上游的**全部**改动
+
+本文件只写了 SUSFS 兼容命令这一块。**完整变更清单**（含构建链迁移、反检测加固、
+3 个打包入口 workflow、6 个脚本、4 篇文档、`config/config`、仓库变量）见：
+
+👉 [`docs/change-inventory.md`](change-inventory.md)
+
+速览：
+
+| 主题 | 关键内容 |
+|---|---|
+| 构建链 | SUKISU → 官方 KernelSU + 官方 AnyKernel3（GKI 模板兜底） |
+| SUSFS | v2.3.0 分支补丁 + KernelSU 侧补丁 + 可选兼容补丁 + 本次两条命令 |
+| 反检测 | `/proc/config.gz` 原地消毒、日志开关、LTO/LOCALVERSION 对齐、自检步骤 |
+| boot.img | KeyMint 版本绑定 AVB 属性、按真实分区大小打包、尺寸断言 |
+| 入口 | `build-ak3.yml` / `build-ak3-stealth.yml` / `build-ak3-toggle.yml` |
+| 仓库变量 | `BOOT_PARTITION_SIZE = 100663296` |
+
+> 已撤销、不在当前树里的：`modules/ts_autorun/`（TrickyStore 日期同步模块）、
+> SukiSU / KPM 相关逻辑、`CONFIG_IKCONFIG=n` 方案（已改为原地消毒）。
+
