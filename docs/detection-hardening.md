@@ -58,11 +58,11 @@ vc-teahouse     ×1
 - `vermagic` 与上面一致，原厂 vendor 模块仍可加载
 - `CONFIG_CC_VERSION_TEXT` 与原厂逐字相同（同一套 clang 18.0.0 / LLD 18.0.0）
 
-## 4. 验证结果（隐身版 vs 上一版）
+## 4. 验证结果（隐身版 vs 旧版）
 
 对 `build-ak3-stealth.yml` 产出的 `boot.img` 直接做字节级比对：
 
-| 特征 | 上一版 | 隐身版 | 说明 |
+| 特征 | 旧版 | 隐身版 | 说明 |
 |---|---|---|---|
 | `IKCFG_ST` / `IKCFG_ED` | 1 / 1 | **0 / 0** | `/proc/config.gz` 完全没有，`.config` 不再进镜像 |
 | `baseband_guard` | 9 | **0** | LSM 列表与原厂一致 |
@@ -119,7 +119,7 @@ com.android.build.boot.security_patch = 2026-09-01
 KeyMint 把 boot 分区的补丁级别写进密钥证明证书的 `bootPatchLevel` 标签。
 
 所以：属性缺失 → bootloader 没有 boot 分区的 SPL 可交 → 证书里的 boot 补丁标签
-为空/0 → 与 `ro.build.version.security_patch`（本机 `2026-10-01`）对不上 → 命中 26。
+为空/0 → 与 `ro.build.version.security_patch`（测试机 `2026-10-01`）对不上 → 命中 26。
 这也解释了为什么“换回上游产物就正常”：上游产物同样是 `add_hash_footer`，
 但它那台设备/那套模块读的是别的来源，而这里 boot 侧完全没数据可读。
 
@@ -215,7 +215,7 @@ susfs4ksu 在 v2.2.0 重构了 sus_mount：不再由用户态逐条上报挂载�
 它发出去的 `0x55560` 落到 `ksu_handle_sys_reboot()` 的 `default: return -EINVAL`，
 `info.err` 保持 255（`ERR_CMD_NOT_SUPPORTED`），于是打印 “not supported”。
 
-本机可以证明这个隐藏其实早就生效了（挂载已经是假 id，用不到手动添加）：
+测试机可以证明这个隐藏其实早就生效了（挂载已经是假 id，用不到手动添加）：
 
 ```
 2000000000 ... /adb/modules/zygisk_lsposed/bin/dex2oat /apex/com.android.art/bin/dex2oat64
