@@ -880,7 +880,20 @@ jobs:
         if: inputs.use_bbg
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
-          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          # setup.sh 走 GitHub raw，偶发 504 会静默失败；失败时 CONFIG_BBG 不在 Kconfig
+          # 里，后面 bazel 只报 "CONFIG_BBG: actual '', expected ..." 很难排查。
+          apply_bbg() {
+            wget -q -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          }
+          apply_bbg
+          if ! grep -q 'baseband_guard' common/security/Kconfig; then
+            echo "::warning::BBG setup.sh 首次未生效（网络抖动？），重试一次"
+            apply_bbg
+          fi
+          grep -q 'baseband_guard' common/security/Kconfig || {
+            echo "::error::BBG 补丁应用失败：common/security/Kconfig 里没有 baseband_guard，请重跑工作流"
+            exit 1
+          }
           echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' common/security/Kconfig
 
