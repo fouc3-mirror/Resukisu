@@ -52,6 +52,10 @@ Wiki 涵盖内容：
 - 🆘 救砖指南
 - 📊 内核版本兼容性说明
 
+本仓库内的补充文档：
+- [SUSFS v2.x 兼容命令（`0x55560` / `0x55580`）发布说明](docs/release-susfs-legacy.md) —— 手动挂载点隐藏/卸载
+- [反检测分析：为什么“原厂内核不暴露，自编译内核暴露”](docs/detection-hardening.md)
+
 ---
 
 ## ❗构建失败常见原因（KernelSU / SUSFS 更新不同步）
