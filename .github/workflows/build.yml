@@ -719,6 +719,13 @@ jobs:
             fi
           fi
 
+          # ---- 恢复 susfs v2.x 被标记 deprecated 的两条命令 ----
+          # 2.2.0 重构 sus_mount 后，内核把 add_sus_mount(0x55560) /
+          # add_try_umount(0x55580) 从命令分发里删了，但用户态 ksu_susfs
+          # 仍然带这两个子命令，调用会返回 "CMD 0x55560 not supported"。
+          # 这里把内核侧实现补回来，细节见 patches/susfs-legacy/。
+          bash "$GITHUB_WORKSPACE/scripts/apply_susfs_legacy_cmds.sh" "$KERNEL_ROOT"
+
       # ==================== Unicode 绕过修复 ====================
       # 修复 Unicode 零宽字符绕过检测的问题
       - name: 应用 Unicode 绕过修复
@@ -927,6 +934,11 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
 
+          # 关键项必须真的落进 .config，否则 susfs_compat.c 会被 #ifdef 掉
+          grep -q '^CONFIG_KSU_SUSFS=y$' "$DEFCONFIG" || { echo "::error::CONFIG_KSU_SUSFS 未写入 .config"; exit 1; }
+          grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y$' "$DEFCONFIG" || { echo "::error::CONFIG_KSU_SUSFS_SUS_MOUNT 未写入 .config"; exit 1; }
+          echo "SUSFS 配置已确认: CONFIG_KSU_SUSFS=y, CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+
       # ==================== 反检测：隐藏 config.gz / SUSFS 日志 ====================
       # 原厂内核同样带 CONFIG_IKCONFIG_PROC，但里面没有 KSU/SUSFS；
       # 我们的 .config 会原样暴露 CONFIG_KSU=y、CONFIG_KSU_SUSFS_*、CONFIG_BBG
@@ -1109,6 +1121,26 @@ jobs:
           cp "$SRC_DIR/Image" ./
           cp "$SRC_DIR/Image.lz4" ./
           gzip -n -k -f -9 ./Image > ./Image.gz
+
+      # ==================== 校验 SUSFS 兼容命令 ====================
+      # 只确认 .config=y 还不够，必须确认符号真的被编译进 Image（没有被 #ifdef 掉）
+      - name: 校验 SUSFS 兼容命令已编入内核
+        if: inputs.enable_susfs
+        run: |
+          set -euo pipefail
+          if [ "${SUSFS_LEGACY_COMPAT:-0}" != "1" ]; then
+            echo "本配置没有启用 SUSFS 兼容命令补丁（老分支/未适用），跳过校验"
+            exit 0
+          fi
+          for sym in susfs_is_sus_mount susfs_add_sus_mount susfs_add_try_umount; do
+            n=$(strings ./bootimgs/Image | grep -c "$sym" || true)
+            echo "符号 $sym 出现次数: $n"
+            if [ "$n" -eq 0 ]; then
+              echo "::error::Image 里找不到 $sym，SUSFS 兼容命令没有被编译进去"
+              exit 1
+            fi
+          done
+          echo "OK: 0x55560 / 0x55580 的实现已编入内核"
 
       # ==================== 消毒 /proc/config.gz ====================
       # 保持 CONFIG_IKCONFIG=y（/proc/config.gz 照旧存在，不改变任何内核行为），

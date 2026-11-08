@@ -192,4 +192,60 @@ kernel identical: True
 > 结论：**26 与内核无关**。内核侧能做的只有 6.3 那件事——把 boot 分区的
 > KeyMint 版本绑定属性补齐到与原厂一致（去掉证书合成模块后才用得上）。
 
+## 7. `add_sus_mount` / `add_try_umount` 返回 “CMD 0x55560 not supported”
+
+### 7.1 现象
+
+```
+su -c "/data/adb/ksu/bin/ksu_susfs add_sus_mount /apex/com.android.art/bin/dex2oat64"
+[-] CMD: '0x55560', SUSFS operation not supported, please enable it in kernel
+```
+
+`CONFIG_KSU_SUSFS_SUS_MOUNT=y` 明明是开的，`ksu_susfs show version` 也返回 `v2.3.0`。
+
+### 7.2 原因：上游重构把命令删了，用户态却还留着
+
+susfs4ksu 在 v2.2.0 重构了 sus_mount：不再由用户态逐条上报挂载，而是内核给
+**ksu 进程创建的挂载**自动分配 `mnt_id >= DEFAULT_KSU_MNT_ID (2000000000)` 的假 id，
+`fs/proc_namespace.c` 里对非 ksu 进程直接跳过这一整段 id。于是内核把
+`CMD_SUSFS_ADD_SUS_MOUNT (0x55560)` / `CMD_SUSFS_ADD_TRY_UMOUNT (0x55580)`
+从命令分发里删掉，只在 `susfs_def.h` 留了 `/* deprecated */` 注释。
+
+但用户态通用二进制（sidex15 的 v2.3.0-R28 `ksu_susfs`）仍然保留这两个子命令，
+它发出去的 `0x55560` 落到 `ksu_handle_sys_reboot()` 的 `default: return -EINVAL`，
+`info.err` 保持 255（`ERR_CMD_NOT_SUPPORTED`），于是打印 “not supported”。
+
+本机可以证明这个隐藏其实早就生效了（挂载已经是假 id，用不到手动添加）：
+
+```
+2000000000 ... /adb/modules/zygisk_lsposed/bin/dex2oat /apex/com.android.art/bin/dex2oat64
+2000000001 ... /adb/modules/zygisk_lsposed/bin/dex2oat /apex/com.android.art/bin/dex2oat32
+```
+
+### 7.3 修复：把两条命令在内核侧补回来
+
+新增 `patches/susfs-legacy/susfs_compat.c`（构建时由
+`scripts/apply_susfs_legacy_cmds.sh` 装进 `common/fs/`）：
+
+| 命令 | 实现 |
+|---|---|
+| `0x55560` `add_sus_mount` | `kern_path()` 定位 inode，打上 `AS_FLAGS_SUS_MOUNT`(bit 34)；`fs/proc_namespace.c` 三个 show 函数在原有 `mnt_id >= 2000000000` 判断后追加 `\|\| susfs_is_sus_mount(mnt)`，把该挂载从 `mounts/mountinfo/mountstats` 里隐藏——与 susfs v1.x 的语义一致 |
+| `0x55580` `add_try_umount` | v2.x 已没有“逐路径 umount 列表”，卸载由 KernelSU 的 `kernel_umount` 负责；这里只做 ABI 兼容，校验路径后返回 0，并在日志里提示 `hide_sus_mnts_for_non_su_procs` 未开时该挂载不会隐藏 |
+
+两个结构体按 `ABI_v2000` 布局实现（`char[256]` + 附加字段 + `int err`），
+并把结果写回用户态 `info.err`，所以旧脚本拿到的是 `rc=0`。
+
+`CONFIG_KSU_SUSFS_SUS_MOUNT=y` 之外，工作流新增两道校验：
+
+1. `.config` 里必须同时有 `CONFIG_KSU_SUSFS=y` 和 `CONFIG_KSU_SUSFS_SUS_MOUNT=y`；
+2. 编出来的 `Image` 里必须能 `strings` 到 `susfs_is_sus_mount` /
+   `susfs_add_sus_mount` / `susfs_add_try_umount`（防止被 `#ifdef` 掉）。
+
+### 7.4 结论
+
+* 对**检测**而言这两条命令不是必需的：ksu 自己创建的挂载（含 LSPosed 的
+  dex2oat 绑定）在 v2.x 里已经自动隐藏；
+* 对**兼容性**而言必需：模块/脚本里写死 `add_sus_mount` 的地方会因
+  `rc!=0` 报错甚至中止，所以内核侧把这条 ABI 补回来。
+
 
