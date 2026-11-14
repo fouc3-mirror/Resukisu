@@ -73,6 +73,13 @@ on:
         required: false
         type: boolean
         default: false
+      # KVM 可选开关：默认 true 保持 gki_defconfig 的 CONFIG_KVM=y；
+      # false 显式关闭 CONFIG_KVM（本机 hypervisor 是 Qualcomm Gunyah、内核跑在 EL1，
+      # pKVM 需要 EL2 启动，所以 KVM 实际不可用，关掉可省这部分代码）。
+      use_kvm:
+        required: false
+        type: boolean
+        default: true
 
       # ==================== 反检测开关 ====================
       # 关闭 CONFIG_IKCONFIG：.config 不再被打进内核镜像，/proc/config.gz 随之消失。
@@ -157,6 +164,7 @@ jobs:
           echo "SUSFS 日志    : ${{ inputs.disable_susfs_log }}（true=关闭）"
           echo "LTO 策略      : ${{ inputs.lto }}"
           echo "KPM 功能      : 已禁用"
+          echo "KVM 支持      : ${{ inputs.use_kvm }}（false=不编译 KVM）"
           echo "Stock Config  : 自动检测 config/stock_defconfig"
           echo "========================================"
 
@@ -910,6 +918,20 @@ jobs:
 
           sed -i '/^CONFIG_KPM=/d; /^# CONFIG_KPM is not set$/d' "$DEFCONFIG"
           echo '# CONFIG_KPM is not set' >> "$DEFCONFIG"
+
+          # KVM 可选：默认保持 gki_defconfig 的 CONFIG_KVM=y；use_kvm=false 时显式关闭。
+          # 本机 Gunyah 在 EL1、pKVM 需要 EL2，运行时 /dev/kvm 不会出现，关掉可去掉这部分代码。
+          if [ "${{ inputs.use_kvm }}" = "false" ]; then
+            sed -i '/^CONFIG_KVM=/d; /^# CONFIG_KVM is not set$/d' "$DEFCONFIG"
+            printf '%s\n' '# CONFIG_KVM is not set' >> "$DEFCONFIG"
+            echo "已关闭 CONFIG_KVM（KVM 不编入内核）"
+          else
+            if ! grep -q '^CONFIG_KVM=' "$DEFCONFIG"; then
+              sed -i '/^# CONFIG_KVM is not set$/d' "$DEFCONFIG"
+              printf '%s\n' 'CONFIG_KVM=y' >> "$DEFCONFIG"
+            fi
+            echo "保留 CONFIG_KVM=y"
+          fi
 
           # 内核本地版本后缀（CONFIG_LOCALVERSION）
           # 最终版本串 = <KERNELVERSION> + kleaf 的 "-<android>-<KMI>" 前缀 + 本后缀

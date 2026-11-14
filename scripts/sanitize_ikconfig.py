@@ -54,6 +54,7 @@ REWRITE = {
     "# CONFIG_LTO_NONE is not set": "CONFIG_LTO_NONE=y",
     "CONFIG_TMPFS_XATTR=y": "# CONFIG_TMPFS_XATTR is not set",
     "CONFIG_TMPFS_POSIX_ACL=y": "# CONFIG_TMPFS_POSIX_ACL is not set",
+    "# CONFIG_KVM is not set": "CONFIG_KVM=y",  # use_kvm=false 时伪装成原厂 KVM=y
     "CONFIG_LOCALVERSION=\"-g0908354dac1b-ab16143355-4k\"": STOCK_LOCALVERSION,
 }
 

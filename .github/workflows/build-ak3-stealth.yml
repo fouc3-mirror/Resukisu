@@ -82,6 +82,11 @@ on:
         required: false
         type: string
         default: "2026-10-01"
+      use_kvm:
+        description: "编译 KVM 支持（本机 Gunyah 在 EL1、pKVM 需要 EL2，实际用不了，可关）"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   # ==================== 预检 ====================
@@ -117,6 +122,7 @@ jobs:
       kernel_localversion: ${{ inputs.kernel_localversion }}
       use_zram: ${{ inputs.use_zram }}
       use_bbg: ${{ inputs.use_bbg }}
+      use_kvm: ${{ inputs.use_kvm }}
       boot_os_version: ""
       boot_security_patch: ${{ inputs.boot_security_patch }}
       enable_susfs: true

@@ -81,6 +81,11 @@ on:
           - thin
           - none
         default: auto
+      use_kvm:
+        description: "编译 KVM 支持（本机 Gunyah 在 EL1、pKVM 需要 EL2，实际用不了，可关）"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   preflight:
@@ -116,6 +121,7 @@ jobs:
       supp_op: false
       enable_susfs: true
       use_bbg: ${{ inputs.use_bbg }}
+      use_kvm: ${{ inputs.use_kvm }}
       hide_kernel_config: ${{ inputs.hide_kernel_config }}
       disable_susfs_log: ${{ inputs.disable_susfs_log }}
       lto: ${{ inputs.lto }}

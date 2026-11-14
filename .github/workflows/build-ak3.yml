@@ -81,6 +81,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_kvm:
+        description: "编译 KVM 支持（本机 Gunyah 在 EL1、pKVM 需要 EL2，实际用不了，可关）"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   # ==================== 预检 ====================
@@ -119,6 +124,7 @@ jobs:
       use_zram: ${{ inputs.use_zram }}
       use_bbg: ${{ inputs.use_bbg }}
       supp_op: ${{ inputs.supp_op }}
+      use_kvm: ${{ inputs.use_kvm }}
       enable_susfs: true
 
   # ==================== 只保留 AK3 包 ====================

@@ -24,7 +24,7 @@
 | KernelSU | 改用官方 `tiann/KernelSU`（`setup.sh` + `KSU_REF`），移除 SukiSU 分支逻辑、KPM、SukiSU 专属挂载 |
 | AnyKernel3 | 使用 `WildKernels/AnyKernel3@gki-2.0`；若检测到上游示例 `anykernel.sh`（`device.name1=maguro`）则替换为 GKI 安全模板（`BLOCK=auto`、`IS_SLOT_DEVICE=auto`、`split_boot`），并加 GKI 内核版本闸门 |
 | SUSFS | 分支由 `gki-<android>-<kernel>` 决定；主补丁 + `KernelSU/10_enable_susfs_for_ksu.patch`；WildKernels 兼容补丁缺失时跳过而不是失败 |
-| 内核配置 | `CONFIG_KSU_SUSFS*` 10 项写入 defconfig；`CONFIG_BBG` 可选；ZRAM LZ4KD 可选；关闭 `check_defconfig` |
+| 内核配置 | `CONFIG_KSU_SUSFS*` 10 项写入 defconfig；`CONFIG_BBG` 可选；ZRAM LZ4KD 可选；`CONFIG_KVM` 可选（`use_kvm`，默认开）；关闭 `check_defconfig` |
 | 隐身 | `CONFIG_LOCALVERSION` 可控并回读校验；LTO 可指定（`auto`/`thin`/`none`）；可关闭 `CONFIG_KSU_SUSFS_ENABLE_LOG`（并补 `SUSFS_LOGI_RL` 空实现）；`/proc/config.gz` 内容替换为原厂内容 |
 | 时间戳 | `KBUILD_BUILD_TIMESTAMP` + 改写 `scripts/mkcompile_h` 的 `UTS_VERSION`，输出 `#1 SMP PREEMPT <指定时间>` |
 | boot.img | header v4；`--os_version` / `--os_patch_level`；写入 AVB 属性 `com.android.build.boot.os_version`、`…security_patch`；`--partition_size` 取仓库变量 `BOOT_PARTITION_SIZE`；构建后校验产物尺寸等于分区大小 |
@@ -33,9 +33,9 @@
 
 | 文件 | 用途 | 关键输入 |
 |---|---|---|
-| `build-ak3.yml` | 单版本 AK3 打包（标准版） | android / kernel / sub_level / os_patch_level / revision / build_time / kernel_localversion / use_zram / use_bbg |
+| `build-ak3.yml` | 单版本 AK3 打包（标准版） | android / kernel / sub_level / os_patch_level / revision / build_time / kernel_localversion / use_zram / use_bbg / use_kvm |
 | `build-ak3-stealth.yml` | 隐身版 AK3（`sanitize_config=true`） | 上述 + `boot_security_patch` |
-| `build-ak3-toggle.yml` | 开关版：4 个布尔量组合，用于二分排查反检测项 | hide_kernel_config / use_bbg / disable_susfs_log / lto |
+| `build-ak3-toggle.yml` | 开关版：4 个布尔量组合，用于二分排查反检测项 | hide_kernel_config / use_bbg / disable_susfs_log / lto / use_kvm |
 
 `Auto_Trigger.yml`、`get-manager.yml`、`main.yml`、`kernel-a12…a16`、`kernel-custom.yml`
 同步改为向 `build.yml` 传递新增输入。
