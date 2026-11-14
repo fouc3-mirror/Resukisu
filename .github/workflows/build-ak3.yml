@@ -86,6 +86,11 @@ on:
         required: false
         type: boolean
         default: true
+      ksu_ref:
+        description: "KernelSU 源码引用（默认 main；上游与 SUSFS 不兼容时可锁 commit/tag）"
+        required: false
+        type: string
+        default: "main"
 
 jobs:
   # ==================== 预检 ====================
@@ -125,6 +130,7 @@ jobs:
       use_bbg: ${{ inputs.use_bbg }}
       supp_op: ${{ inputs.supp_op }}
       use_kvm: ${{ inputs.use_kvm }}
+      ksu_ref: ${{ inputs.ksu_ref }}
       enable_susfs: true
 
   # ==================== 只保留 AK3 包 ====================

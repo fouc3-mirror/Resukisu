@@ -34,6 +34,12 @@ on:
         required: false
         type: string
         default: Official
+      # 官方 KernelSU 源码引用：默认 main（跟随最新）；可传 tag/commit 锁版本，
+      # 用于上游 KSU 与 SUSFS 补丁暂时不兼容时临时固定（如 730f644）。
+      ksu_ref:
+        required: false
+        type: string
+        default: "main"
 
       # ==================== 可选配置 ====================
       version:
@@ -155,7 +161,7 @@ jobs:
           echo "子版本号      : ${{ inputs.sub_level }}"
           echo "补丁级别      : ${{ inputs.os_patch_level }}"
           echo "KSU 名称      : KernelSU (官方)"
-          echo "KSU 源码      : tiann/KernelSU main"
+          echo "KSU 源码      : tiann/KernelSU ${{ inputs.ksu_ref }}"
           echo "构建时间      : ${{ inputs.build_time }}"
           echo "SUSFS 状态    : ${{ inputs.enable_susfs }}"
           echo "ZRAM 增强     : ${{ inputs.use_zram }}"
@@ -559,8 +565,9 @@ jobs:
       - name: 确定官方 KernelSU 源码
         id: ksu-branch
         run: |
-          # 始终跟随官方 tiann/KernelSU main 分支最新提交
-          KSU_REF="main"
+          # 默认跟随官方 main；可通过 ksu_ref 传 tag/commit 锁版本
+          KSU_REF="${{ inputs.ksu_ref }}"
+          [ -n "$KSU_REF" ] || KSU_REF="main"
           echo "KSU_REF=$KSU_REF" >> "$GITHUB_ENV"
           echo "KernelSU 源码引用: $KSU_REF"
 
@@ -614,8 +621,12 @@ jobs:
           if patch -p1 --dry-run --forward < 10_enable_susfs_for_ksu.patch >/dev/null 2>&1; then
             patch -p1 --forward < 10_enable_susfs_for_ksu.patch
           else
-            echo "::warning::10_enable_susfs_for_ksu.patch 与当前 KernelSU 上下文不完全匹配，尝试容错应用"
+            echo "::warning::10_enable_susfs_for_ksu.patch 与当前 KernelSU 上下文不完全匹配，尝试容错应用（-F 3）"
             patch -p1 --forward -F 3 < 10_enable_susfs_for_ksu.patch || true
+          fi
+          if find . -name '*.rej' -print -quit | grep -q .; then
+            echo "::error::SUSFS 的 KernelSU 侧补丁没有干净应用（存在 .rej）：当前 KSU 与 SUSFS 补丁不兼容。请用 ksu_ref 锁到兼容提交（例如 730f644）或等 SUSFS 更新"
+            exit 1
           fi
           cd ..
 
